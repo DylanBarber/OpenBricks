@@ -132,9 +132,26 @@ The Operations screen creates streamed local backups, optionally encrypted. **Ba
 
 ## Versioned images and upgrades
 
-The release workflow publishes separate management and compute images. After confirming a release's packages are available, use `docker compose -f compose.release.yaml pull` and `docker compose -f compose.release.yaml up -d` with the same `.env` and project name. Both Compose files use the same named data volume. Never run two management owners against it simultaneously. `compose.yaml` remains the source-build option. Image overrides are `OPENBRICKS_RUNTIME_IMAGE` and `OPENBRICKS_COMPUTE_IMAGE`.
+Prebuilt release images are published on Docker Hub as [darbs5342/openbricks](https://hub.docker.com/r/darbs5342/openbricks) for management and [darbs5342/openbricks-compute](https://hub.docker.com/r/darbs5342/openbricks-compute) for compute. To use the matching stable images, set these values in your existing `.env`:
+
+```dotenv
+OPENBRICKS_RUNTIME_IMAGE=darbs5342/openbricks:0.4.0
+OPENBRICKS_COMPUTE_IMAGE=darbs5342/openbricks-compute:0.4.0
+```
+
+GHCR images remain supported. To use GHCR instead, set the same two variables to `ghcr.io/dylanbarber/openbricks:0.4.0` and `ghcr.io/dylanbarber/openbricks-compute:0.4.0`, respectively.
 
 Before an upgrade, back up local data and separate storage/catalog volumes. Stop new submissions and wait for active work to finish. The first start migrates existing records into the shared default project; legacy members retain editor access there. Review assignments before inviting more users. Use matching management/compute versions and retain old images needed by pinned environments. A code rollback alone does not undo metadata changes; use a validated pre-upgrade backup if restoring an older release. See [release process](docs/RELEASING.md).
+
+Start the prebuilt deployment with the same `.env` and project name:
+
+```console
+docker compose -f compose.release.yaml pull
+docker compose -f compose.release.yaml up -d
+docker compose -f compose.release.yaml ps
+```
+
+Both Compose files use the same named data volume. Never run two management owners against it simultaneously. `compose.yaml` remains the source-build option; the image overrides above apply to `compose.release.yaml`.
 
 An image export contains the runtime, not your data volumes. Before moving or replacing a host, back up the relevant volumes separately and restore their ownership so the service account can write them. Avoid `docker compose down -v` unless deleting those persistent volumes is intentional.
 
