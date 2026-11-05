@@ -1,0 +1,549 @@
+![OpenBricks — an open home for your data work](docs/assets/openbricks-banner.svg)
+
+# OpenBricks
+
+**An open home for your data work.**
+
+A self-hosted notebook workspace for Python, Spark SQL, and scheduled data pipelines. OpenBricks brings notebooks, Git imports, reusable Python packages, object storage, and compute management into one browser UI.
+
+Start with two Docker containers on one computer. Add trusted remote compute hosts when you need more room. Keep your files on your own infrastructure, with no cloud account required.
+
+[Quick start](#quick-start) · [Git walkthrough](#from-git-to-a-scheduled-pipeline) · [Examples](#example-projects) · [Deployment](DEPLOYMENT.md) · [Contributing](CONTRIBUTING.md)
+
+<details>
+<summary>Explore the guide</summary>
+
+- [Meet the workspace](#meet-the-workspace)
+- [Your first notebook](#your-first-notebook)
+- [From Git to a scheduled pipeline](#from-git-to-a-scheduled-pipeline)
+- [Example projects](#example-projects)
+- [Reusable Python packages](#reusable-python-packages)
+- [Scheduling and run history](#scheduling-and-run-history)
+- [SQL Server and object storage](#connect-your-data)
+- [Optional Unity Catalog](#optional-unity-catalog-oss)
+- [Architecture and remote compute](#architecture-and-remote-compute)
+- [Memory and sessions](#memory-and-session-behavior)
+- [Persistence, backups, and portability](#persistence-backups-and-portability)
+- [Trust model and boundaries](#trust-model-and-current-boundaries)
+- [Development](#development)
+- [FAQ](#faq)
+- [Contributing and brand assets](#contribute-and-make-it-yours)
+
+</details>
+
+## Why OpenBricks?
+
+The name is a nod to familiar notebook workflows and the open building blocks underneath them. OpenBricks is for small, trusted teams who want to explore data, share Python code, and run repeatable jobs on infrastructure they control.
+
+- **A complete workspace:** organize notebooks in folders, mix Python and SQL, inspect results, and trace scheduled runs.
+- **Real Spark:** run Apache Spark locally in a dedicated compute container, or connect an OpenBricks compute service to an existing Spark standalone deployment.
+- **Portable by design:** container images carry the runtime; persistent volumes carry your workspace and data.
+- **Open components:** Apache Spark, SeaweedFS, and optional Unity Catalog OSS, with an Apache-2.0-licensed application.
+
+OpenBricks is an independent project inspired by Databricks. It is not affiliated with Databricks or a complete implementation of its platform, APIs, or security model.
+
+## Meet the workspace
+
+![The OpenBricks workspace in dark mode](docs/assets/workspace-dark.png)
+
+The screenshot shows the bundled starter's SQL report, executed with synthetic data in a disposable workspace. [See its imported notebook folders](docs/assets/workspace-folders-dark.png).
+
+| Capability | What you can do |
+| --- | --- |
+| Notebooks | Create Python, Spark SQL, and Markdown cells; run cells or whole notebooks; inspect tables, text, errors, and run details |
+| Workspace folders | Create nested directories, follow breadcrumbs, search, rename, and move notebooks or folders |
+| Git | Clone HTTPS/SSH repositories, pull updates, and import notebook files while preserving directories |
+| Python packages | Build wheels from Git projects or upload wheels; synchronize installed wheel artifacts to remote compute |
+| Scheduling | Use Basic hourly/daily/weekly controls or Advanced cron, with timezones and a compute target |
+| Run history | Start with notebook summaries, then page and filter that notebook's runs; load outputs when opening a run |
+| SQL Server | Save named connections for reads, parameterized execution, inserts, and bounded conversion to Spark |
+| Object storage | Browse filesystem-backed buckets or S3-compatible endpoints, including optional local SeaweedFS |
+| Compute | Separate management and execution containers; register and test remote compute services |
+| Data catalog | Optionally browse Unity Catalog OSS, create catalogs/schemas, and register external tables |
+| Team and appearance | Administrator/member accounts and System, Light, or Dark themes |
+
+## Quick start
+
+You need Docker Engine with Docker Compose, or Docker Desktop using Linux containers. The Docker setup includes Python, Java, Spark, and the SQL Server ODBC driver; you do not need those runtimes installed on the host.
+
+### 1. Prepare configuration
+
+Clone the repository, then work in the directory containing `compose.yaml`:
+
+~~~console
+git clone https://github.com/DylanBarber/OpenBricks.git
+cd OpenBricks
+~~~
+
+You can also download the source archive from GitHub. Create `.env` if it does not already exist.
+
+**Bash:**
+
+~~~bash
+test -f .env || cp .env.example .env
+~~~
+
+**PowerShell:**
+
+~~~powershell
+if (!(Test-Path .env)) { Copy-Item .env.example .env }
+~~~
+
+Open `.env` and set:
+
+| Required setting | Choose |
+| --- | --- |
+| `OPENBRICKS_ADMIN_PASSWORD` | A unique administrator password of at least 12 characters |
+| `OPENBRICKS_COMPUTE_TOKEN` | A separate random token of at least 32 characters; a password manager can generate it |
+
+The initial administrator username defaults to `admin`. Keep `.env` private, and preserve existing configuration and volumes when upgrading.
+
+### 2. Build and start
+
+These commands work in Bash and PowerShell:
+
+~~~console
+docker compose up --build -d
+docker compose ps
+~~~
+
+The first build downloads the dependencies, Spark libraries, and drivers. Later notebook sessions use the libraries packaged in the image.
+
+### 3. Open your workspace
+
+Visit **[http://localhost:3000](http://localhost:3000)** and sign in. Use **Team & settings** to add trusted collaborators, and **Color theme** to choose your appearance.
+
+For another computer, use the server's reachable address and port. Put HTTPS in front of remote UI access and set `OPENBRICKS_SECURE_COOKIE=true` when serving the UI over HTTPS. See the [deployment guide](DEPLOYMENT.md) for network setup.
+
+The default deployment starts management and compute. Local S3 storage and the data catalog are optional profiles described below.
+
+~~~console
+docker compose logs -f openbricks compute
+docker compose stop
+docker compose up -d
+~~~
+
+Stopping or recreating containers preserves their data volumes.
+
+## Your first notebook
+
+1. Open **Notebooks**, create a folder, and create a notebook inside it.
+2. Keep **Default local compute** selected. Add the Python and SQL cells below.
+3. Choose **Run all**. Use **Run cell** or **Shift + Enter** while exploring.
+
+**Python cell:**
+
+~~~python
+people = spark.createDataFrame(
+    [(1, "Ada"), (2, "Grace"), (3, "Katherine")],
+    ["id", "name"],
+)
+people.createOrReplaceTempView("people")
+display(people)
+~~~
+
+**SQL cell:**
+
+~~~sql
+SELECT id, upper(name) AS name
+FROM people
+ORDER BY id
+~~~
+
+Python cells expose `spark`, `sc`, `display`, `blob`, `dbutils.fs`, `connections`, and `catalog`. A Python cell beginning with `%sql` also runs as SQL. Import Jupyter `.ipynb`, Databricks source `.py`, or `.sql` notebooks, and download edited notebooks as `.ipynb`.
+
+Individual cell runs retain that notebook's Python variables while its compute interpreter remains active. **Run all** starts a fresh Python namespace. Spark temporary views share the compute service's Spark session, so choose distinct names across projects. See [memory and sessions](#memory-and-session-behavior) for idle shutdown and resets.
+
+## From Git to a scheduled pipeline
+
+The [starter repository](examples/notebook-repo/) demonstrates the complete workflow. It includes a buildable Python package, a packaged CSV dataset, bronze/silver/gold transformations, and one notebook that runs the whole pipeline.
+
+~~~text
+examples/notebook-repo/
+├── pyproject.toml
+├── src/openbricks_demo/
+│   ├── pipeline.py
+│   └── fixtures/orders.csv
+└── notebooks/
+    ├── 00_run_pipeline.py
+    ├── bronze/10_ingest_orders.py
+    ├── silver/20_clean_orders.py
+    └── gold/
+        ├── 30_publish_revenue.py
+        └── 40_query_revenue.sql
+~~~
+
+### 1. Clone a repository in the UI
+
+Open **Git repositories → Clone repository**.
+
+| Field | For the bundled example |
+| --- | --- |
+| **Display name** | `OpenBricks examples` |
+| **Repository URL** | `https://github.com/DylanBarber/OpenBricks.git` |
+| **Branch** | `main` |
+
+Choose **Clone repository**. The server clones the selected branch or tag and displays its commit. The checkout lives on the management host; this step does not yet create workspace notebooks.
+
+For a smaller standalone project, copy `examples/notebook-repo/` into your own Git repository and clone that repository instead. The [Git guide](docs/GIT_IMPORTS.md) covers both layouts, private access, and troubleshooting.
+
+### 2. Import notebook files
+
+On the repository card, choose **Import notebooks**, then open **Notebooks**.
+
+A workspace folder named after the repository's display name contains the imported directories. When cloning this whole project, follow the folders through `examples/notebook-repo/notebooks`. For the standalone starter, go directly to `notebooks`.
+
+Discovery includes `.ipynb`, `.sql`, and Databricks source `.py` files whose opening section contains `# Databricks notebook source`. Ordinary Python modules remain package source. Hidden/common dependency directories are skipped, and one import discovers up to 500 notebook files.
+
+### 3. Build the project's Python wheel
+
+The starter notebooks use `openbricks_demo`, so install its wheel before their first run.
+
+Open **Packages → Build wheel**, select the cloned repository, and set **Project directory**:
+
+| What you cloned | Project directory |
+| --- | --- |
+| This complete OpenBricks project | `examples/notebook-repo` |
+| The starter copied into its own repository | `.` |
+
+Choose **Build & install**. The path is relative to the cloned repository's root and must contain `pyproject.toml` or `setup.py`.
+
+### 4. Run the complete pipeline
+
+Open `00_run_pipeline.py`, displayed as **00 run pipeline**, select compute, and choose **Run all**. It calls the packaged bronze, silver, and gold transformations together. Input data is packaged in the wheel, so the pipeline does not depend on the Git checkout's working directory.
+
+The supplied nine-row fixture produces six valid orders, two quarantined orders, and five completed orders totaling **85.50**. The notebook asserts those results, and a second run replaces outputs without adding duplicates.
+
+The layer notebooks let you explore individual stages. Schedule the complete pipeline notebook for repeatable end-to-end execution.
+
+### 5. Schedule it
+
+Open **Jobs & schedules → Create job**, choose **00 run pipeline**, select a timezone and compute target, and use **Basic** to pick a daily time. Use **Run now** to check the saved job. Its runs appear under that notebook in **Run history**.
+
+### Bring in later Git changes
+
+| Action | Effect |
+| --- | --- |
+| **Pull latest** | Fast-forwards the Git checkout; workspace notebooks are unchanged |
+| **Import notebooks** again | Updates matching imports by repository and relative path, keeping their IDs, folder assignments, and compute selections |
+| Editing a workspace notebook | Changes the workspace copy; the UI does not commit or push it to Git |
+| Deleting a file upstream | Does not automatically delete its imported workspace notebook |
+
+**Re-importing overwrites local workspace edits to matching notebooks.** Keep the source of record in Git and export any workspace-only edits before importing again. Package changes also require rebuilding the wheel.
+
+Private repositories use the management server's Git credentials or SSH keys and known hosts in persistent `/data/home`. Embedded passwords/tokens in clone URLs are rejected. See [Git notebook imports](docs/GIT_IMPORTS.md) for setup and exact copy/update behavior.
+
+## Example projects
+
+| Example | Start here |
+| --- | --- |
+| [Notebook repository starter](examples/notebook-repo/) | A self-contained medallion-style pipeline, wheel, packaged data, and notebook folders |
+| [Hello Spark](examples/hello_spark.py) | A small Databricks source notebook to import and run |
+| [Brickkit](examples/brickkit/) | A minimal Python wheel for reusable notebook functions |
+| [External example repositories](docs/EXAMPLE_REPOSITORIES.md) | Curated projects with format, dependency, and adaptation notes |
+
+The starter is the best first import because its code and data are designed for this runtime. External examples may require packages, datasets, credentials, or changes to platform-specific APIs.
+
+For public upstream repositories to explore:
+
+| Repository | Selected notebook | Fit |
+| --- | --- | --- |
+| [databricks/bundle-examples](https://github.com/databricks/bundle-examples), branch `main` | [Minimal Python notebook](https://github.com/databricks/bundle-examples/blob/1b358c3d3d82c1560aaed60a68647e1b2d5f0fd2/knowledge_base/target_includes/src/notebook.py) and [Spark SQL range](https://github.com/databricks/bundle-examples/blob/1b358c3d3d82c1560aaed60a68647e1b2d5f0fd2/knowledge_base/job_with_sql_notebook/select.sql) | Small source-format examples; the surrounding bundle deployment configuration is specific to Databricks |
+| [delta-io/delta-examples](https://github.com/delta-io/delta-examples), branch `master` | [PySpark quickstart](https://github.com/delta-io/delta-examples/blob/82ed21472bcd9801f0919b98a5afe9f40b3fcd74/notebooks/pyspark/01_quickstart.ipynb) | A Jupyter adaptation exercise; review Spark/Delta versions and replace its standalone session setup before execution |
+
+These selected files were inspected and parsed, not executed as part of this project's verification. Other files in those repositories may require Databricks services or additional dependencies. The [curated guide](docs/EXAMPLE_REPOSITORIES.md) records exact clone URLs, paths, revisions, and limitations; start with a selected-file download if you do not want to clone/import a whole repository.
+
+## Reusable Python packages
+
+Use **Packages** to build from a cloned Git project or upload an existing `.whl`. For example, build [Brickkit](examples/brickkit/) in a Python environment with the `build` package installed:
+
+~~~bash
+python -m build --wheel examples/brickkit
+~~~
+
+Upload the generated wheel from its `dist/` directory. In a notebook:
+
+~~~python
+from brickkit import normalize_name
+
+print(normalize_name("  ada   lovelace "))
+# Ada Lovelace
+~~~
+
+Wheels install persistently into `/data/site-packages`. Before remote execution, management transfers installed wheel artifacts to the selected compute service. **Raw Git checkouts and arbitrary local files are not replicated.** Package reusable code and small resources into wheels; use shared object storage for larger datasets.
+
+Installation uses `--no-index --no-deps`, and builds use `--no-isolation`. Supply dependency wheels and required build backends explicitly. Native wheels must match Linux, Python 3.12, and the image's architecture. Package changes require idle execution environments and reset their interpreters so updated modules load consistently.
+
+## Scheduling and run history
+
+**Basic** provides hourly, daily, and selected-weekday controls. **Advanced** accepts five-field cron:
+
+| Cron | Meaning in the selected timezone |
+| --- | --- |
+| `0 8 * * 1-5` | Weekdays at 08:00 |
+| `*/15 * * * *` | Every 15 minutes |
+| `0 0 1 * *` | Midnight on the first day of each month |
+
+Jobs retain their scheduling mode, show the next trigger, and support editing, enable/disable, and **Run now**. Choose an IANA timezone such as `America/New_York`; daylight-saving rules apply. A job can use its notebook's compute target or override it.
+
+Schedules continue with the browser closed while management and compute are available. Missed triggers while management is stopped are not replayed.
+
+**Run history** groups by notebook, then provides paginated run lists and status filters. Opening a run loads its outputs. Workspace/history pages fetch summaries instead of every notebook cell or historical result, so frequently scheduled notebooks do not crowd a single flat history list.
+
+## Connect your data
+
+### Microsoft SQL Server
+
+In **Connections**, add a named **SQL Server** connection with server, port, database, username, and password, then test it. Local and remote servers use Microsoft's ODBC Driver 18, included in the image. SQL authentication is supported; Windows integrated authentication and enterprise SSO are outside the current implementation.
+
+Encryption and certificate verification default to enabled. The database must be reachable from the selected compute host. Inside a container, `localhost` means that container; use the database's reachable address or Docker Desktop's `host.docker.internal` where applicable.
+
+With a saved connection named `Reporting` and the referenced tables already created:
+
+~~~python
+db = connections.sqlserver("Reporting")
+
+display(db.read(
+    "SELECT TOP (100) CustomerID, Name FROM dbo.Customers WHERE Status = ?",
+    ["active"],
+))
+
+db.execute(
+    "UPDATE dbo.Orders SET Status = ? WHERE OrderID = ?",
+    ["processed", 123],
+)
+
+db.insert(
+    "Events",
+    [{"EventID": 101, "Message": "Created in OpenBricks"}],
+    schema="dbo",
+)
+~~~
+
+Values use ODBC `?` parameters. Explicit writes commit on success and roll back on error. `read_table(...)` reads an existing table, `query(...)` returns columns/rows metadata, and `to_spark(...)` offers bounded conversion for small result sets. Plan larger transfers in batches.
+
+The connector has automated parameter-binding and transaction coverage. A live SQL Server round trip remains outside the current [verification record](VERIFICATION.md).
+
+### SeaweedFS and S3-compatible storage
+
+**SeaweedFS** is the bundled free, local S3-compatible runtime. To enable it, add unique credentials to `.env`:
+
+~~~dotenv
+COMPOSE_PROFILES=storage
+OPENBRICKS_S3_ENDPOINT=http://seaweedfs:8333
+OPENBRICKS_S3_ACCESS_KEY=your-chosen-access-key
+OPENBRICKS_S3_SECRET_KEY=your-unique-secret-key
+~~~
+
+Run `docker compose up -d`. It creates the `openbricks` bucket and appears as **Local SeaweedFS** in Connections/Object storage. The host endpoint defaults to `http://127.0.0.1:8333`; containers use `http://seaweedfs:8333`.
+
+You can also add named S3 connections to existing local or remote compatible services. Browse buckets/prefixes, upload/download objects, and page listings with continuation tokens.
+
+~~~python
+storage = connections.s3("Local SeaweedFS")
+storage.write_text("openbricks", "examples/people.csv", "id,name\n1,Ada\n2,Grace\n")
+
+local_file = storage.path("s3://openbricks/examples/people.csv")
+display(spark.read.option("header", True).csv(local_file))
+~~~
+
+`storage.path(...)` stages one object on the selected compute host; it does not mount a bucket. Native Spark `s3a://` access is available when the catalog/S3 integration is configured. Remote hosts need reachable storage URLs; private Docker names on the management host do not automatically resolve elsewhere.
+
+### Filesystem-backed local buckets
+
+The built-in `blob://` helper works directly with local files:
+
+~~~python
+blob.create_bucket("raw")
+blob.write_text("blob://raw/example.txt", "Hello from OpenBricks")
+print(blob.read_text("blob://raw/example.txt"))
+~~~
+
+`blob.path(...)` supplies a local path for Spark readers. `dbutils.fs` supports `ls`, `head`, `put`, `mkdirs`, and `rm`; `dbfs:/...` maps to the local `default` bucket.
+
+Bundled management and compute share files in `/data`. Remote compute services each own a local volume; use S3 for data shared across hosts.
+
+## Optional Unity Catalog OSS
+
+Enable the catalog alongside storage:
+
+~~~dotenv
+COMPOSE_PROFILES=storage,catalog
+OPENBRICKS_CATALOG_URL=http://catalog:8080
+OPENBRICKS_CATALOG_NAMES=unity
+~~~
+
+Keep the S3 credentials from the storage setup, then run `docker compose up -d`.
+
+The **Data catalog** UI browses catalogs, schemas, tables, and columns. Administrators can create catalogs/schemas and register external table metadata. Spark queries registered tables with three-part names.
+
+For example, write Parquet data:
+
+~~~python
+orders = spark.createDataFrame([(1, 20.0), (2, 22.0)], ["order_id", "amount"])
+orders.write.mode("overwrite").parquet("s3a://openbricks/curated/orders")
+~~~
+
+In Data catalog, create catalog `analytics`, schema `default`, and external table `orders` at `s3://openbricks/curated/orders`, with `order_id` LONG and `amount` DOUBLE columns. Attach it and query:
+
+~~~python
+catalog.attach("analytics")
+display(spark.sql("SELECT * FROM analytics.default.orders ORDER BY order_id"))
+~~~
+
+Configured catalogs attach at interpreter startup through `OPENBRICKS_CATALOG_NAMES`. Unqualified Hive tables continue using `spark_catalog`. Registration does not copy data; every compute host needs access to the storage location. The bundled catalog allows credentials for the `openbricks` bucket by default; configure `OPENBRICKS_CATALOG_S3_BUCKETS` for additional buckets.
+
+The bundled service uses Unity Catalog OSS 0.7.0 with its Spark connector and Delta Spark 4.3.1. It runs privately with authorization disabled for a trusted team. **It is a shared metadata catalog, not enterprise per-user governance or an isolation boundary.** Read the [catalog deployment guidance](DEPLOYMENT.md#add-the-optional-unity-catalog-service) before connecting other hosts or exposing services.
+
+Use named SQL Server connections for database queries. Unity Catalog coordinates file-backed table metadata here; enabling it does not add SQL Server federation.
+
+## Architecture and remote compute
+
+~~~mermaid
+flowchart LR
+    Browser["Remote browser"] --> Management["Management<br/>UI · accounts · Git · schedules · history"]
+    Management --> Local["Bundled compute<br/>Python · Spark · execution queue"]
+    Management --> Remote["Remote compute services<br/>Independent hosts and volumes"]
+    Management --> Data[("Workspace volume<br/>Metadata · notebooks · wheels")]
+    Local --> Data
+    Local -.-> Storage[("Optional SeaweedFS<br/>or another S3 endpoint")]
+    Remote -.-> Storage
+    Local -.-> Catalog["Optional Unity Catalog OSS"]
+    Remote -.-> Catalog
+~~~
+
+| Service | Default memory ceiling | Default host exposure |
+| --- | --- | --- |
+| Management (`openbricks`) | 1 GB | UI port 3000; backend API port 8000 stays internal |
+| Bundled `compute` | 4 GB; Spark heap 1 GB | API port 8001 stays on the Docker network |
+| Optional `seaweedfs` | 512 MB | S3 port 8333 on host loopback |
+| Optional `catalog` | 1 GB; Java heap 512 MB | Port 8080 stays on the Docker network |
+
+Each compute service has one execution queue. Different services run concurrently. The initial Spark setting is `local[2]`, using two execution threads inside compute.
+
+The packaged stack uses Python 3.12, Apache Spark 4.0.1, Java 17, Next.js 16, React 19, and SQLite metadata. Optional local services are pinned to SeaweedFS 4.52 and Unity Catalog OSS 0.7.0. See the Dockerfile, Compose files, and Python/npm manifests for dependency versions and service configuration.
+
+To add another host:
+
+1. Deploy the compute image with [compose.compute.yaml](compose.compute.yaml), a unique token, and its own volume.
+2. Put its loopback API behind HTTPS.
+3. In **Compute clusters**, choose **Add remote cluster**, enter its URL/token, and choose **Test connection**.
+4. Select that service in a notebook or job.
+
+Register an **OpenBricks compute service** URL. An existing Spark standalone master is configured separately with `SPARK_MASTER=spark://...`; OpenBricks does not provision machines, create workers, or autoscale them. Driver networking, shared datasets, and compatible dependencies require explicit setup.
+
+Remote catalog/S3 endpoints need independently reachable addresses too. See [DEPLOYMENT.md](DEPLOYMENT.md) for topology, TLS, image transfer, and Spark standalone configuration.
+
+## Memory and session behavior
+
+Management and compute default to **1 GB** and **4 GB** limits, with no extra swap. These are ceilings, not memory reserved at startup. Spark's heap is only part of compute memory: Python, native JVM memory, libraries, and the API share that allowance.
+
+Compute releases its Spark/Python interpreter after **15 minutes with no active or queued work**. The next run starts fresh. Notebook definitions, installed wheels, files, and persistent tables survive; Python variables and temporary views do not.
+
+| Setting | Default | Purpose |
+| --- | --- | --- |
+| `OPENBRICKS_CONTROL_MEMORY_LIMIT` | `1g` | Management ceiling |
+| `OPENBRICKS_MEMORY_LIMIT` | `4g` | Compute ceiling |
+| `SPARK_DRIVER_MEMORY` | `1g` | Spark heap within compute's allowance |
+| `SPARK_MASTER` | `local[2]` | Local threads, or an existing Spark master |
+| `OPENBRICKS_IDLE_TIMEOUT_SECONDS` | `900` | Idle shutdown; `0` disables it |
+| `OPENBRICKS_RUN_TIMEOUT` | `3600` | Maximum run seconds |
+
+Cancellation or timeout resets the affected interpreter and its notebook sessions. Management restarts reconnect to known remote run IDs; compute restarts lose in-memory sessions and fail unfinished work. Output previews are bounded; persist large results to storage.
+
+Docker Desktop/WSL host-memory limits and cache reclamation are separate settings. The [host memory guide](DEPLOYMENT.md#docker-desktop-and-wsl-host-memory) includes an optional WSL example.
+
+## Persistence, backups, and portability
+
+| Volume | Contains |
+| --- | --- |
+| `openbricks-data` | Management metadata, notebooks, Git checkouts, wheels, packages, local buckets, local Spark warehouse, and separate compute state |
+| `seaweedfs-data` | Optional S3 data |
+| `catalog-data` | Optional catalog metadata |
+| Remote `compute-data` | That compute service's files, wheels, warehouse, and execution state |
+
+Management uses `/data/openbricks.sqlite3`; compute owns `/data/compute-state/openbricks.sqlite3`. Preserve volumes during updates. `docker compose down -v` deletes the deployment's volumes.
+
+Saved connection credentials and compute tokens are encrypted with `/data/secrets.key`, or an explicit `OPENBRICKS_SECRET_KEY`. **Back up metadata and its encryption key together.** Include object data, wheel artifacts, warehouses, and optional service volumes.
+
+Move locally built images to a compatible Docker host:
+
+~~~console
+docker save openbricks:local openbricks-compute:local -o openbricks-images.tar
+docker load -i openbricks-images.tar
+~~~
+
+Images contain runtimes, not data volumes. Transfer Compose/configuration files and volume backups separately. See [backup guidance](DEPLOYMENT.md#trust-secrets-and-backups).
+
+## Trust model and current boundaries
+
+OpenBricks is for a **trusted team**. Notebook/package code executes with the selected service account's access. Members can use shared connections with those saved accounts' permissions. Administrators manage accounts, connections, and compute configuration.
+
+Registered compute hosts receive notebook source and saved workspace connection definitions, including credentials. Delivery is not scoped per notebook. Register trusted hosts, use HTTPS remotely, and grant database/storage accounts the access your team needs.
+
+Current boundaries include:
+
+- No per-notebook ACL model, enterprise SSO, or isolation between untrusted notebook authors.
+- No automatic infrastructure provisioning, Spark autoscaling, or general Databricks API compatibility.
+- Python and Spark SQL execution; Scala and R kernels are not included.
+- Git import creates workspace copies; there is no UI commit/push workflow.
+- Wheel synchronization transfers packages, not every local file.
+- SQL Server has connector tests; live-server validation is still needed.
+
+See [SECURITY.md](SECURITY.md) for security and vulnerability reporting, and [VERIFICATION.md](VERIFICATION.md) for tested flows and limits.
+
+## Development
+
+The UI is in `web/`; management and compute are in `backend/`. Local development uses Node.js 22+, Python 3.12, and Java 17 for Spark.
+
+After creating a Python virtual environment and installing `backend/requirements.txt`:
+
+~~~bash
+# Backend checks, from backend/
+python -m pytest -q
+
+# UI setup and checks, from web/
+npm ci
+npm run typecheck
+npm run build
+~~~
+
+Without `OPENBRICKS_COMPUTE_URL`, a development API uses an embedded engine. Standard Compose uses the separate compute service. [CONTRIBUTING.md](CONTRIBUTING.md) covers setup, running the app, conventions, and contributions.
+
+The [split-container smoke script](scripts/v2-smoke.py) creates fixtures and exercises real services on a disposable QA deployment. Use it only with a disposable workspace; see [VERIFICATION.md](VERIFICATION.md).
+
+## FAQ
+
+**Do I need a cloud account?**
+
+No. Management, compute, local buckets, optional SeaweedFS, and optional Unity Catalog can all run on one Docker host.
+
+**Can I open the UI from another computer?**
+
+Yes. Use the server's configured address/port, HTTPS for remote access, and keep internal services private.
+
+**Does registering hosts distribute one notebook across them?**
+
+Each compute service is an independent execution target. Multi-node Spark needs an existing Spark deployment and explicit driver/data configuration.
+
+**Will notebooks and packages survive a restart?**
+
+Yes, when their volumes are preserved. In-memory variables and temporary views reset after idle shutdown or interpreter restarts.
+
+**Does Git keep my notebook edits synchronized?**
+
+Pull and import are explicit. Re-import overwrites matching workspace source; the UI does not push edits to Git.
+
+**Why can Spark still use significant memory?**
+
+The JVM, Python processes, and caches share compute's allowance. Container limits bound usage, and idle shutdown releases an unused interpreter.
+
+## Contribute and make it yours
+
+Bug fixes, focused features, documentation, and reproducible examples are welcome. Start with [CONTRIBUTING.md](CONTRIBUTING.md), review [SECURITY.md](SECURITY.md), and explore [Git imports](docs/GIT_IMPORTS.md) and [example repositories](docs/EXAMPLE_REPOSITORIES.md).
+
+OpenBricks is licensed under [Apache License 2.0](LICENSE). Third-party components retain their licenses and notices; see [NOTICE](NOTICE).
+
+[![OpenBricks mark](docs/assets/openbricks-mark.svg)](docs/BRAND.md)
+
+[Brand assets and guidelines](docs/BRAND.md)

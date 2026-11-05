@@ -1,0 +1,7 @@
+# Keep Docker entrypoints and source portable across Windows and Linux checkouts.
+* text=auto eol=lf
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.ico binary
+*.whl binary
