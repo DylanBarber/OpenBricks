@@ -32,18 +32,68 @@ jobs:
         run: |
           echo "owner=${OWNER,,}" >> "$GITHUB_OUTPUT"
           echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+      - name: Configure registry publication
+        id: publication
+        shell: bash
+        env:
+          OWNER: ${{ steps.identity.outputs.owner }}
+          VERSION: ${{ steps.identity.outputs.version }}
+          IMAGE_NAME: ${{ matrix.image }}
+          DOCKERHUB_ENABLED: ${{ vars.DOCKERHUB_ENABLED }}
+          DOCKERHUB_NAMESPACE: ${{ vars.DOCKERHUB_NAMESPACE }}
+          DOCKERHUB_USERNAME: ${{ vars.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          ghcr_tag="ghcr.io/${OWNER}/${IMAGE_NAME}:${VERSION}"
+          hub_tag=""
+          case "$DOCKERHUB_ENABLED" in
+            true)
+              if [[ -z "$DOCKERHUB_NAMESPACE" || -z "$DOCKERHUB_USERNAME" || -z "$DOCKERHUB_TOKEN" ]]; then
+                echo "::error::Docker Hub publishing is enabled; configure DOCKERHUB_NAMESPACE, DOCKERHUB_USERNAME and the DOCKERHUB_TOKEN secret."
+                exit 1
+              fi
+              if [[ ! "$DOCKERHUB_NAMESPACE" =~ ^[a-z0-9]+([._-][a-z0-9]+)*$ ]]; then
+                echo "::error::DOCKERHUB_NAMESPACE must be a lowercase Docker Hub namespace without a registry, slash or whitespace."
+                exit 1
+              fi
+              hub_tag="docker.io/${DOCKERHUB_NAMESPACE}/${IMAGE_NAME}:${VERSION}"
+              echo "Docker Hub requested: \`${hub_tag}\`. Both registries must publish successfully." >> "$GITHUB_STEP_SUMMARY"
+              ;;
+            ""|false)
+              echo "Docker Hub skipped: DOCKERHUB_ENABLED is unset or false. This release publishes to GHCR only." >> "$GITHUB_STEP_SUMMARY"
+              ;;
+            *)
+              echo "::error::DOCKERHUB_ENABLED must be true, false or unset."
+              exit 1
+              ;;
+          esac
+          {
+            echo "tags<<OPENBRICKS_REGISTRY_TAGS"
+            echo "$ghcr_tag"
+            if [[ -n "$hub_tag" ]]; then echo "$hub_tag"; fi
+            echo "OPENBRICKS_REGISTRY_TAGS"
+            echo "dockerhub_enabled=${DOCKERHUB_ENABLED:-false}"
+          } >> "$GITHUB_OUTPUT"
       - uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Login to Docker Hub
+        if: steps.publication.outputs.dockerhub_enabled == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: docker.io
+          username: ${{ vars.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
       - uses: docker/build-push-action@v6
         with:
           context: .
           target: ${{ matrix.target }}
           platforms: linux/amd64
           push: true
-          tags: ghcr.io/${{ steps.identity.outputs.owner }}/${{ matrix.image }}:${{ steps.identity.outputs.version }}
+          tags: ${{ steps.publication.outputs.tags }}
           build-args: |
             OPENBRICKS_BUILD_ID=${{ github.sha }}
             OPENBRICKS_VERSION=${{ steps.identity.outputs.version }}
@@ -51,6 +101,13 @@ jobs:
             type=gha,scope=compute
             type=gha,scope=${{ matrix.target }}
           cache-to: type=gha,mode=max,scope=${{ matrix.target }}
+      - name: Report published registries
+        shell: bash
+        env:
+          TAGS: ${{ steps.publication.outputs.tags }}
+        run: |
+          printf 'Published versioned image tags:\n\n' >> "$GITHUB_STEP_SUMMARY"
+          while IFS= read -r tag; do printf -- '- `%s`\n' "$tag" >> "$GITHUB_STEP_SUMMARY"; done <<< "$TAGS"
       - name: Export portable Docker image
         env:
           IMAGE: ghcr.io/${{ steps.identity.outputs.owner }}/${{ matrix.image }}:${{ steps.identity.outputs.version }}

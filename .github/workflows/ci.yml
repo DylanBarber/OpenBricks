@@ -96,7 +96,7 @@ jobs:
           python-version: '3.12'
       - run: python -m pip install ./cli pytest==8.3.5
       - name: Smoke runner isolation and watcher checks
-        run: python -m pytest -q tests/test_system_smoke_runner.py
+        run: python -m pytest -q tests/test_system_smoke_runner.py tests/test_release_workflow.py
       - uses: docker/setup-buildx-action@v3
       - uses: docker/build-push-action@v6
         with:
