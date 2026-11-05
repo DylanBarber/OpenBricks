@@ -243,12 +243,14 @@ class BackupAutomation:
                 self.store.put("backup_runs", item)
                 continue
             backup = self.store.get("backups", item.get("_backup_id", ""))
-            if backup and backup.get("status") == "running":
+            if backup and backup.get("status") in ("running", "queued"):
                 backup.update(
                     status="failed",
                     error="Management restarted before the local archive completed",
+                    finished_at=now(),
                 )
                 self.store.put("backups", backup)
+            if not backup or backup.get("status") != "succeeded":
                 item.pop("_backup_id", None)
             item.update(status="queued", recovered_at=now())
             self.store.put("backup_runs", item)
@@ -855,28 +857,51 @@ class BackupAutomation:
     def restore_remote(self, source, phrase):
         if not self.external_restore_lock.acquire(blocking=False):
             raise HTTPException(409, "Another remote recovery operation is in progress")
+        operations = self.app.state.operations
+        reserved = paused_manager = maintenance_owned = scheduler_paused = False
+        previously_paused = self.paused.is_set()
         try:
-            self.pause(wait=True)
+            # Reserve before changing any state. An overlapping local backup
+            # owns its maintenance flag and scheduler pause until it finishes.
+            if not operations.lock.acquire(blocking=False):
+                raise HTTPException(409, "A backup or cleanup is already running")
+            reserved = True
             if getattr(self.app.state, "restore_required", False):
                 raise HTTPException(
                     503, "The workspace must restart before another restore"
                 )
-            self.app.state.operations.require_idle()
-            self.app.state.operations.begin_maintenance(
+            if getattr(self.app.state, "maintenance", None):
+                raise HTTPException(409, "Workspace maintenance is already in progress")
+            paused_manager = True
+            self.pause(wait=True)
+            operations.require_idle()
+            operations.begin_maintenance(
                 "Downloading and validating a remote workspace backup"
             )
+            maintenance_owned = True
             self.app.state.scheduler.pause()
+            scheduler_paused = True
             with self.downloaded(
                 source, expected_sha=source.get("sha256"), check=self.check_service
             ) as path:
                 self.check_service()
-                return self.app.state.operations.restore(path, phrase)
+                return operations._restore_locked(path, phrase)
         finally:
-            if not getattr(self.app.state, "restore_required", False):
-                self.app.state.maintenance = None
-                self.app.state.scheduler.resume()
-                self.resume()
-            self.external_restore_lock.release()
+            try:
+                if not getattr(self.app.state, "restore_required", False):
+                    if maintenance_owned:
+                        self.app.state.maintenance = None
+                    if paused_manager:
+                        if previously_paused:
+                            self.paused.set()
+                        else:
+                            self.resume()
+                    if scheduler_paused:
+                        self.app.state.scheduler.resume()
+            finally:
+                if reserved:
+                    operations.lock.release()
+                self.external_restore_lock.release()
 
     def check_service(self):
         if self.stop_event.is_set() or getattr(

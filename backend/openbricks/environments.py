@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import errno
 import json
 import importlib.metadata
 import os
@@ -130,16 +131,38 @@ def get_environment(store, identity, project_id="default"):
     return validate_manifest({"id": record["manifest_id"], "wheels": record["wheels"], "runtime": record.get("runtime", runtime_identity())})
 
 
+def _completed_environment(directory, root, manifest):
+    target, ready = root / "site-packages", root / "ready.json"
+    if (
+        root.parent.is_symlink()
+        or root.is_symlink()
+        or ready.is_symlink()
+        or target.is_symlink()
+        or not root.resolve().is_relative_to(directory)
+        or not ready.is_file()
+        or not target.is_dir()
+    ):
+        raise ValueError("Pinned environment cache is incomplete or inconsistent")
+    try:
+        valid = json.loads(ready.read_text(encoding="utf-8")) == manifest
+    except (OSError, ValueError):
+        valid = False
+    if not valid:
+        raise ValueError("Pinned environment cache is incomplete or inconsistent")
+    return target
+
+
 def prepare_environment(directory, manifest):
     manifest = validate_manifest(manifest)
     if manifest["runtime"] != runtime_identity():
         raise ValueError("Pinned environment requires a different runtime build; deploy its original compatible compute image")
-    root = Path(directory) / "environments" / manifest["id"]
+    directory = Path(directory).resolve()
+    root = directory / "environments" / manifest["id"]
+    if root.parent.is_symlink() or root.is_symlink():
+        raise ValueError("Pinned environment cache cannot use symbolic links")
     target = root / "site-packages"
     if (root / "ready.json").is_file():
-        if json.loads((root / "ready.json").read_text(encoding="utf-8")) != manifest or not target.is_dir():
-            raise ValueError("Pinned environment cache is incomplete or inconsistent")
-        return target
+        return _completed_environment(directory, root, manifest)
     paths = []
     for item in manifest["wheels"]:
         path = artifact_path(directory, item)
@@ -157,12 +180,18 @@ def prepare_environment(directory, manifest):
         (staging / "ready.json").write_text(json.dumps(manifest), encoding="utf-8")
         root.parent.mkdir(parents=True, exist_ok=True)
         if root.exists():
-            if not (root / "ready.json").is_file():
-                raise ValueError("Pinned environment cache is incomplete; remove the incomplete cache before retrying")
-            shutil.rmtree(staging)
+            _completed_environment(directory, root, manifest)
         else:
-            staging.replace(root)
-        return target
+            try:
+                staging.replace(root)
+            except OSError as exc:
+                # Another worker may have atomically published the identical
+                # cache since exists(). Reuse only its complete matching cache;
+                # missing markers or unrelated I/O/permission failures surface.
+                if exc.errno not in (errno.EEXIST, errno.ENOTEMPTY, errno.EACCES, errno.EPERM) or not (root / "ready.json").is_file():
+                    raise
+                _completed_environment(directory, root, manifest)
+        return _completed_environment(directory, root, manifest)
     finally:
         if staging.exists():
             shutil.rmtree(staging)

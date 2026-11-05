@@ -427,6 +427,21 @@ class Operations:
             target=self._loop, name="openbricks-retention", daemon=True
         )
         (self.store.directory / "backups").mkdir(exist_ok=True)
+        # A workspace has one management owner. Its background archive threads
+        # cannot survive process startup; retain their files for inspection,
+        # but never leave their records looking like live work indefinitely.
+        finished = now()
+        with self.store.connect() as db:
+            db.execute(
+                """UPDATE documents SET status='failed', finished_at=?,
+                body=json_set(body,'$.status','failed','$.finished_at',?,'$.error',?)
+                WHERE kind='backups' AND status IN ('running','queued')""",
+                (
+                    finished,
+                    finished,
+                    "Management restarted before this backup completed",
+                ),
+            )
 
     def policy(self):
         return {
@@ -757,6 +772,18 @@ class Operations:
         self.require_idle()
         if not self.lock.acquire(blocking=False):
             raise HTTPException(409, "A backup or cleanup is already running")
+        try:
+            return self._restore_locked(upload, passphrase)
+        finally:
+            self.lock.release()
+
+    def _restore_locked(self, upload, passphrase):
+        """Restore while the caller retains the operations reservation.
+
+        Remote recovery reserves it before staging its download, so another
+        backup/restore cannot take over that maintenance window in between.
+        """
+        self.require_idle()
         root = self.store.directory
         rollback = root / "backups" / ("pre-restore-" + uuid4().hex)
         staging = root / "backups" / (".restore-" + uuid4().hex)
@@ -856,7 +883,6 @@ class Operations:
             raise
         finally:
             shutil.rmtree(staging, ignore_errors=True)
-            self.lock.release()
 
 
 def register_operation_routes(app, authenticated, admin):

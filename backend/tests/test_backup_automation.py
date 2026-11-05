@@ -113,6 +113,10 @@ class Operations:
         self.app.state.restore_required = True
         return {"ok": True, "restart_required": True}
 
+    def _restore_locked(self, path, phrase):
+        assert self.lock.locked()
+        return self.restore(path, phrase)
+
 
 @pytest.fixture
 def workspace(tmp_path, monkeypatch):
