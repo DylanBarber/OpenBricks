@@ -236,9 +236,12 @@ class NotificationManager:
 
     def _discover(self):
         instant = datetime.now(timezone.utc)
+        # SQLite trigger timestamps always include a fractional part. Keep one
+        # here too: "...:00.000+00:00" sorts after an equal "...:00+00:00".
+        discovery_time = instant.isoformat(timespec="microseconds")
         with self.store.connect() as db:
             candidates = db.execute("SELECT kind,run_id,generation FROM notification_candidates WHERE ready_at<=? ORDER BY ready_at,kind,run_id LIMIT ?",
-                                    (instant.isoformat(), self.discovery_batch)).fetchall()
+                                    (discovery_time, self.discovery_batch)).fetchall()
         for kind, identifier, generation in candidates:
             next_due = None
             try:

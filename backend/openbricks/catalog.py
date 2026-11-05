@@ -171,6 +171,11 @@ def catalog_request(method, path, *, params=None, body=None):
             "Unity Catalog is unavailable. Check that its service is running and reachable",
         )
     if not response.is_success:
+        # OSS Unity Catalog 0.7 reports duplicate resources as HTTP 400.
+        try:
+            error_code = response.json().get("error_code")
+        except (ValueError, AttributeError):
+            error_code = None
         if response.status_code in (401, 403):
             raise HTTPException(
                 502,
@@ -178,7 +183,16 @@ def catalog_request(method, path, *, params=None, body=None):
             )
         if response.status_code == 404:
             raise HTTPException(404, "Catalog object not found")
-        if response.status_code == 409:
+        if response.status_code == 409 or (
+            response.status_code == 400
+            and error_code
+            in {
+                "ALREADY_EXISTS",
+                "CATALOG_ALREADY_EXISTS",
+                "SCHEMA_ALREADY_EXISTS",
+                "TABLE_ALREADY_EXISTS",
+            }
+        ):
             raise HTTPException(409, "A catalog object with this name already exists")
         if response.status_code in (400, 422):
             raise HTTPException(

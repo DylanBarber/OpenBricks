@@ -154,6 +154,42 @@ def test_slow_and_failure_are_distinct_once_only_events(tmp_path, monkeypatch):
     assert events == ["slow", "failed"]
 
 
+def test_failure_transition_at_exact_second_is_discovered_without_another_poll(tmp_path, monkeypatch):
+    store, destination = setup(tmp_path)
+    destination["events"] = ["slow", "failed"]
+    store.put("notification_targets", destination)
+    manager = NotificationManager(store)
+    running = run(store, status="running")
+    events = []
+    monkeypatch.setattr(notifications, "send_notification", lambda store, destination, payload: events.append(payload["event"]))
+    # Begin with an overdue slow candidate, independent of the wall-clock tick.
+    with store.connect() as db:
+        db.execute("UPDATE notification_candidates SET ready_at='2000-01-01T00:00:00+00:00'")
+    manager.poll_once()
+    assert events == ["slow"]
+
+    exact_second = datetime.now(timezone.utc).replace(microsecond=0)
+    store.put("runs", {**running, "status": "failed", "finished_at": exact_second.isoformat()})
+    with store.connect() as db:
+        # Replay the trigger's real SQLite timestamp format at the instant the
+        # Python discovery clock reaches an exact second (no fractional text).
+        db.execute("UPDATE notification_candidates SET ready_at=strftime('%Y-%m-%dT%H:%M:%f+00:00',?) WHERE kind='runs' AND run_id=?",
+                   (exact_second.isoformat(), running["id"]))
+
+    class ExactSecondClock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return exact_second if tz is not None else exact_second.replace(tzinfo=None)
+
+    monkeypatch.setattr(notifications, "datetime", ExactSecondClock)
+    manager.poll_once()
+    assert events == ["slow", "failed"]
+    manager.poll_once()
+    assert events == ["slow", "failed"]
+    with store.connect() as db:
+        assert db.execute("SELECT COUNT(*) FROM notification_candidates").fetchone()[0] == 0
+
+
 def test_completion_during_discovery_preserves_new_candidate_generation(tmp_path, monkeypatch):
     store, _ = setup(tmp_path)
     manager = NotificationManager(store)

@@ -262,3 +262,20 @@ def test_catalog_client_keeps_optional_token_out_of_url(monkeypatch):
     with catalog.catalog_client(catalog.catalog_url()) as client:
         assert client.headers["Authorization"] == "Bearer private-token-value"
         assert "private-token-value" not in str(client.base_url)
+
+
+@pytest.mark.parametrize(
+    "code", ["CATALOG_ALREADY_EXISTS", "SCHEMA_ALREADY_EXISTS", "TABLE_ALREADY_EXISTS"]
+)
+def test_oss_duplicate_codes_are_conflicts_without_exposing_remote_messages(
+    client, monkeypatch, code
+):
+    mock_catalog(
+        monkeypatch,
+        lambda request: httpx.Response(
+            400, json={"error_code": code, "message": "private-upstream-details"}
+        ),
+    )
+    response = client.post("/api/catalog/catalogs", json={"name": "recovery"})
+    assert response.status_code == 409
+    assert "private-upstream-details" not in response.text

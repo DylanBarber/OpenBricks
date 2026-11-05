@@ -1,5 +1,22 @@
 # Verification
 
+## OpenBricks v0.4
+
+Validation used disposable management/compute containers through the real Next.js proxy, with separate SeaweedFS and Unity Catalog services. A second management/compute pair and independent volumes exercised fresh-deployment recovery. Synthetic fixtures were kept separate from the existing installation.
+
+- The integrated Linux suite passed 226 tests under a 4 GB ceiling, including real Spark/Delta quality, replay, local Hive restore, and independent-session catalog handoff. Subsequent regressions cover owned JVM cleanup, catalog duplicate errors, and exact-second notification polling. The release workflow runs the complete final suite as its publication gate.
+- The final live SQL Server run passed two tests in 43.69 seconds under a 3 GB test ceiling. It covered ODBC parameter binding/inserts/rollback, a 12,050-row JDBC read, Change Tracking snapshot/insert/update/delete/replay, schema drift, source reset, unrelated sinks, missing sinks, and Delta sinks restored behind their saved checkpoint.
+- Actual UI-proxy checks proved independent notebook variables, cell reuse, fresh job workers, two 512 MB workers, bounded queues, and targeted queued/active cancellation. DuckDB bound parameters, saved/reloaded CSV source mappings, and returned results without a Spark JVM.
+- A real public Git clone/import preserved workspace edits on conflict, rejected stale file hashes, exported notebooks, and committed locally. Browser review displayed the source diff and made another local commit. External push behavior uses a local bare repository in automated tests; GitHub PR requests are mocked to avoid publishing synthetic reviews.
+- The CLI packed the runnable project example, planned/deployed with a scoped service token, ran with the service-account owner, promoted captured sources/environments, and verified workflow results. Project/action denials and token revocation passed through the UI proxy.
+- A three-date backfill kept one captured source after the workspace notebook was edited. File arrival and upstream workflow completion each produced one durable event/run and deduplicated repeated checks. A real Delta append produced one downstream event/run without a polling Spark process. Browser checks confirmed per-date outcomes and Basic/Advanced backup schedules.
+- Encrypted S3 backup creation, immutable receipts, isolated boot/sign-in/file checks, remote re-download verification, and rejection of wrong passphrases/tampered copies passed against real SeaweedFS. A catalog-inclusive archive restored onto independent management/compute volumes; selected objects recovered with exact bytes/hashes, excluded objects stayed absent, and a new Unity Catalog recovered exact table columns/properties. Repeated recovery preserved existing objects and catalog resources.
+- An encrypted pre-upgrade archive of the existing workspace passed the isolated restore drill with its 2 notebooks and 3 prior run records preserved. Runtime images and Docker limits are verified separately during deployment.
+
+The HTTP reproductions are `scripts/v4-runtime-smoke.py`, `scripts/v4-automation-smoke.py`, `scripts/v4-delivery-smoke.py`, `scripts/v4-git-smoke.py`, and the phased `scripts/v4-recovery-smoke.py`. They reject the normal production port and create synthetic records. Read each script's configuration before running it against a disposable deployment. The SQL harness is [compose.sql-tests.yaml](compose.sql-tests.yaml).
+
+Worker budgets use a sampled process-tree RSS guard within the compute container, with Docker enforcing the aggregate ceiling. They are not separate security containers. Event table polling observes Delta transaction-log commits. Catalog recovery supports external tables and preserves existing resources; it does not restore owners/grants or service databases. Object/catalog exports do not provide a cross-service transaction. These checks do not certify arbitrary remote networks, external SMTP/webhook destinations, or every S3 implementation.
+
 ## Public documentation and branding update
 
 - The expanded README and focused Git guide were checked against the actual clone/import/build/runtime code. Re-import overwrite behavior, branch/tag limits, private Git credentials, and local versus remote storage are documented explicitly.

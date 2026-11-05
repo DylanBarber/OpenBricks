@@ -1,6 +1,12 @@
 "use client";
 import dynamic from "next/dynamic";
-import { useEffect, useState, type FormEvent } from "react";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type FormEvent,
+} from "react";
 import {
   GitBranch,
   GitCommitHorizontal,
@@ -29,6 +35,7 @@ type GitStatus = {
   has_github_token: boolean;
 };
 type OpenFile = { path: string; source: string; sha256: string };
+type EditorFile = OpenFile & { savedSource: string };
 
 export default function GitWorkspacePanel({
   repositoryId,
@@ -57,7 +64,7 @@ export default function GitWorkspacePanel({
     >(null),
     [selectedPaths, setSelectedPaths] = useState<string[]>([]),
     [selectedNotebooks, setSelectedNotebooks] = useState<string[]>([]),
-    [file, setFile] = useState<OpenFile | null>(null),
+    [file, setFile] = useState<EditorFile | null>(null),
     [diff, setDiff] = useState<string>(""),
     [newPath, setNewPath] = useState(""),
     [linkNotebook, setLinkNotebook] = useState(""),
@@ -73,6 +80,23 @@ export default function GitWorkspacePanel({
   const canEdit = ["admin", "owner", "editor"].includes(role),
     prefix = `/repositories/${encodeURIComponent(repositoryId)}/git`,
     status = loaded?.id === repositoryId ? loaded.value : null;
+  const previousHead = useRef<string | null>(null);
+  const invalidateFilePreview = useCallback(() => {
+    setDiff("");
+    setFile((current) =>
+      current && current.source !== current.savedSource ? current : null,
+    );
+  }, []);
+  useEffect(() => {
+    if (
+      previousHead.current &&
+      status?.commit &&
+      previousHead.current !== status.commit
+    ) {
+      invalidateFilePreview();
+    }
+    previousHead.current = status?.commit || null;
+  }, [status?.commit, invalidateFilePreview]);
   useEffect(() => {
     let stopped = false;
     api<GitStatus>(`${prefix}/status`)
@@ -131,7 +155,7 @@ export default function GitWorkspacePanel({
           `${prefix}/diff?path=${encodeURIComponent(path)}`,
         ),
       ]);
-      setFile(opened);
+      setFile({ ...opened, savedSource: opened.source });
       setDiff(
         patch.text + (patch.truncated ? "\n… diff preview truncated" : ""),
       );
@@ -140,9 +164,10 @@ export default function GitWorkspacePanel({
   async function submit(event: FormEvent) {
     event.preventDefault();
     await perform(async () => {
-      if (modal === "branch")
+      if (modal === "branch") {
         await api(`${prefix}/branch`, json("POST", { name: branch }));
-      else if (modal === "commit")
+        invalidateFilePreview();
+      } else if (modal === "commit") {
         await api(
           `${prefix}/commit`,
           json("POST", {
@@ -152,7 +177,8 @@ export default function GitWorkspacePanel({
             author_email: authorEmail || undefined,
           }),
         );
-      else if (modal === "credential") {
+        invalidateFilePreview();
+      } else if (modal === "credential") {
         await api(`${prefix}/github-credential`, json("PUT", { token }));
         setToken("");
       } else if (modal === "link") {
@@ -205,7 +231,22 @@ export default function GitWorkspacePanel({
           <button
             className="button compact"
             disabled={busy}
-            onClick={() => setVersion((value) => value + 1)}
+            onClick={() =>
+              void perform(async () => {
+                setDiff("");
+                const latest = await api<GitStatus>(`${prefix}/status`);
+                setLoaded({ id: repositoryId, value: latest });
+                if (file) {
+                  const patch = await api<{ text: string; truncated: boolean }>(
+                    `${prefix}/diff?path=${encodeURIComponent(file.path)}`,
+                  );
+                  setDiff(
+                    patch.text +
+                      (patch.truncated ? "\n… diff preview truncated" : ""),
+                  );
+                }
+              })
+            }
           >
             <RefreshCw size={14} />
             Refresh
@@ -228,8 +269,7 @@ export default function GitWorkspacePanel({
                           create: false,
                         }),
                       );
-                      setFile(null);
-                      setDiff("");
+                      invalidateFilePreview();
                     })
                   }
                 >
@@ -484,7 +524,12 @@ export default function GitWorkspacePanel({
                         "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
                     }),
                   );
-                  setFile({ path: newPath, source, sha256: saved.sha256 });
+                  setFile({
+                    path: newPath,
+                    source,
+                    savedSource: source,
+                    sha256: saved.sha256,
+                  });
                   setDiff("");
                   setSelectedPaths((values) =>
                     values.includes(newPath) ? values : [...values, newPath],
@@ -514,7 +559,11 @@ export default function GitWorkspacePanel({
                       expected_sha256: file.sha256,
                     }),
                   );
-                  setFile({ ...file, sha256: saved.sha256 });
+                  setFile({
+                    ...file,
+                    savedSource: file.source,
+                    sha256: saved.sha256,
+                  });
                   const result = await api<{ text: string }>(
                     `${prefix}/diff?path=${encodeURIComponent(file.path)}`,
                   );

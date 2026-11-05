@@ -83,6 +83,8 @@ The screenshot shows a real Spark SQL result and chart from a disposable workspa
 
 See the [automation guide](docs/AUTOMATION.md), [data guide](docs/DATA_WORKSPACE.md), and [backup guide](docs/OPERATIONS.md) for examples and limits.
 
+[View a completed three-date backfill in the actual UI](docs/assets/openbricks-v0.4-backfill.png).
+
 ## Quick start
 
 You need Docker Engine with Docker Compose, or Docker Desktop using Linux containers. The Docker setup includes Python, Java, Spark, and the SQL Server ODBC driver; you do not need those runtimes installed on the host.
