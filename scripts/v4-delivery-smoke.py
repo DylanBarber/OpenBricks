@@ -178,10 +178,10 @@ class Proof:
         )
         packed["name"] = "delivery-qa-" + self.suffix
         packed["targets"]["prod"]["project_id"] = project["id"]
-        self.request("GET", "/notebooks/page?project_id=default", token=read_token)
+        self.request("GET", "/notebooks?project_id=default", token=read_token)
         self.request(
             "GET",
-            "/notebooks/page?project_id=" + project["id"],
+            "/notebooks?project_id=" + project["id"],
             token=read_token,
             expected=403,
         )

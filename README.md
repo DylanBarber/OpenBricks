@@ -59,17 +59,17 @@ The screenshot shows a real Spark SQL result and chart from a disposable workspa
 | Notebooks and editor | Mix Python, Spark SQL, and Markdown; use highlighting, completion suggestions, formatting, tabs, notebook-wide find/replace, and source revisions |
 | Parameters | Define typed defaults/required inputs, override them for manual or scheduled runs, and use a limited widgets compatibility helper |
 | Workspace folders | Create nested directories, follow breadcrumbs, search, rename, and move notebooks or folders |
-| Git and releases | Clone/pull/import notebook repositories, capture exact committed sources, compare releases, and run pinned notebook paths |
+| Git and releases | Clone/import, edit files, branch, diff, export notebooks, commit/push, create pull requests, and capture exact committed sources |
 | Python packages | Build/upload wheels, capture content-addressed package environments, and synchronize required artifacts to compute |
 | Workflows | Connect notebooks in a dependency graph with per-step compute/timeouts, explicit safe retries, and captured-source repair/rerun |
-| Scheduling | Schedule notebooks or workflows with Basic hourly/daily/weekly controls or Advanced cron and timezones |
+| Scheduling | Basic or cron schedules with timezones, missed-run recovery, date backfills, and file/Delta/workflow triggers |
 | Runs | Page notebook/workflow histories and inspect cell progress, bounded live logs, results, peak interpreter memory, and provenance |
 | Data workspace | Explore sources, save parameterized SQL queries, inspect history/previews, and draw simple charts from bounded results |
 | Data quality and Delta | Run checks, record lineage, inspect/time-travel/maintain Delta tables, and define incremental SQL Server-to-Delta imports |
 | SQL Server and storage | Use named SQL Server connections, local filesystem buckets, or S3-compatible endpoints including optional SeaweedFS |
 | Compute and catalog | Manage separate local/remote execution targets and optionally use Unity Catalog OSS shared metadata |
 | Projects and appearance | Assign viewer/operator/editor/owner roles and selected notebook connections; use System, Light, or Dark themes |
-| Operations | Inspect resources, manage retention and local backups/restore, and configure encrypted webhook/SMTP alert destinations |
+| Operations | Inspect worker budgets, manage retention, encrypted local/off-host backups, restore drills, recovery plans, and alert destinations |
 
 ### New in 0.4
 
@@ -529,7 +529,7 @@ Configure project webhook or SMTP targets for failed, slow, or successful runs, 
 
 ## Trust model and current boundaries
 
-OpenBricks is for a **trusted team**. Notebook/package code executes with the selected service account's access. Project viewer/operator/editor/owner roles govern browsing, execution, edits, and membership. Administrators manage global accounts, connection/compute assignments, and operations. These are trusted-team API controls, not filesystem, Spark-session, or untrusted-code isolation. See [Projects & access](docs/PROJECTS.md).
+OpenBricks is for a **trusted team**. Notebook/package code executes with the selected service account's access. Project viewer/operator/editor/owner roles govern browsing, execution, edits, and membership. Administrators manage global accounts, connection/compute assignments, and operations. These are trusted-team API controls, not filesystem or untrusted-code isolation. See [Projects & access](docs/PROJECTS.md).
 
 Registered compute hosts receive notebook source and the notebook's explicitly selected, project-available connection definitions/credentials. Empty selections dispatch no saved connector credentials. Current permissions and credential values are rechecked when work is dispatched; snapshots do not freeze secrets. Register trusted hosts, use HTTPS remotely, and grant underlying database/storage accounts only the access the team needs.
 

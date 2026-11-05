@@ -397,7 +397,7 @@ def test_watermark_literal_escapes_and_rejects_nonfinite():
 
 
 @pytest.fixture(scope="module")
-def packaged_spark():
+def packaged_spark(owned_spark_gateway):
     if os.getenv("OPENBRICKS_TEST_SPARK") != "1":
         pytest.skip("Enable in packaged Java17/Spark compute environment")
     from pyspark.sql import SparkSession

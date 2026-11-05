@@ -20,6 +20,7 @@ import {
   type Project,
 } from "@/lib/api";
 import { Empty, Field, Modal, Pagination, Spinner, Status } from "./ui";
+import CronScheduleFields from "./cron-schedule-fields";
 
 type Source = { connection_id: string; bucket: string; prefix: string };
 type Policy = {
@@ -656,28 +657,20 @@ export default function BackupPoliciesPanel({
                   }
                 />
               </Field>
-              <Field
-                label="Schedule (cron)"
-                hint="Five fields: minute, hour, day, month, weekday. 0 2 * * * runs daily at 02:00."
-              >
-                <input
-                  required
-                  value={editing.cron}
-                  onChange={(event) =>
-                    setEditing({ ...editing, cron: event.target.value })
-                  }
-                />
-              </Field>
-              <Field label="Time zone">
-                <input
-                  required
-                  placeholder="UTC or America/New_York"
-                  value={editing.timezone}
-                  onChange={(event) =>
-                    setEditing({ ...editing, timezone: event.target.value })
-                  }
-                />
-              </Field>
+              <CronScheduleFields
+                key={editing.id || "new-policy"}
+                cron={editing.cron}
+                timezone={editing.timezone}
+                disabled={busy}
+                onCronChange={(cron) =>
+                  setEditing((value) => (value ? { ...value, cron } : value))
+                }
+                onTimezoneChange={(timezone) =>
+                  setEditing((value) =>
+                    value ? { ...value, timezone } : value,
+                  )
+                }
+              />
               <Field
                 label="Encryption passphrase"
                 hint={

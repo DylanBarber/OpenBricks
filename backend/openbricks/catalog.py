@@ -14,7 +14,7 @@ from urllib.parse import quote, unquote, urlsplit
 
 import httpx
 from fastapi import Depends, HTTPException, Query
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 API_PREFIX = "/api/2.1/unity-catalog"
 IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,254}$")
@@ -62,6 +62,22 @@ class CatalogInput(BaseModel):
     project_id: str = "default"
     name: str = Field(min_length=1, max_length=255)
     comment: str | None = Field(default=None, max_length=4000)
+    properties: dict[str, str] = Field(default_factory=dict, max_length=100)
+
+    @field_validator("properties")
+    @classmethod
+    def bounded_properties(cls, value):
+        if (
+            any(
+                not key or len(key) > 255 or len(item) > 4000
+                for key, item in value.items()
+            )
+            or len(json.dumps(value)) > 65536
+        ):
+            raise ValueError(
+                "Catalog properties must fit 64 KB, with keys up to 255 and values up to 4,000 characters"
+            )
+        return value
 
 
 class SchemaInput(CatalogInput):
@@ -75,6 +91,10 @@ class ColumnInput(BaseModel):
     type_json: str | None = Field(default=None, max_length=20000)
     position: int | None = Field(default=None, ge=0, le=1999)
     nullable: bool = True
+    comment: str | None = Field(default=None, max_length=4000)
+    partition_index: int | None = Field(default=None, ge=0, le=1999)
+    type_precision: int | None = Field(default=None, ge=1, le=38)
+    type_scale: int | None = Field(default=None, ge=0, le=38)
 
 
 class TableInput(SchemaInput):
@@ -271,6 +291,15 @@ def table_payload(body: TableInput):
                 "type_json": type_json,
                 "position": position,
                 "nullable": column.nullable,
+                **column.model_dump(
+                    include={
+                        "comment",
+                        "partition_index",
+                        "type_precision",
+                        "type_scale",
+                    },
+                    exclude_none=True,
+                ),
             }
         )
     return {
@@ -281,6 +310,7 @@ def table_payload(body: TableInput):
         "data_source_format": format_name,
         "storage_location": storage_location(body.storage_location),
         "columns": columns,
+        "properties": body.properties,
         **({"comment": body.comment} if body.comment is not None else {}),
     }
 

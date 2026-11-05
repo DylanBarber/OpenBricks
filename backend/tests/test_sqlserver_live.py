@@ -64,7 +64,7 @@ def database():
 
 
 @pytest.fixture(scope="module")
-def spark(database):
+def spark(database, owned_spark_gateway):
     from pyspark.sql import SparkSession
     from openbricks.spark_catalog import configure_catalog
 
