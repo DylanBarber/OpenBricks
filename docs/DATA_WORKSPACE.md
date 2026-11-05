@@ -115,6 +115,8 @@ ALTER TABLE dbo.Orders ENABLE CHANGE_TRACKING;
 
 Grant the connector account the required read and `VIEW CHANGE TRACKING` permissions. Merge keys must match the complete source primary key. Use a new Delta sink owned by this ingestion; an unrelated pre-existing table is rejected.
 
+Native SQL queries return `time` and `datetimeoffset` as ISO strings, preserving SQL Server's seven fractional digits and the original timezone offset. Change Tracking stores `time` as text because Spark does not support the Parquet TIME type. Spark timestamp columns have microsecond precision; `datetimeoffset` values normalize to UTC, and a seventh fractional digit on a non-key timestamp is narrowed to microseconds. Timestamp primary keys with precision greater than six are rejected before writing because distinct SQL keys could otherwise collapse to the same Spark timestamp.
+
 ```json
 {
   "project_id": "default",

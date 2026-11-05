@@ -6,9 +6,10 @@ import json
 import math
 import os
 import re
+import struct
 import tempfile
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, time as time_value, timezone
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -22,6 +23,64 @@ from starlette.background import BackgroundTask
 from starlette.concurrency import run_in_threadpool
 
 from .credentials import SecretBox
+
+SQL_SS_TIME2 = -154
+SQL_SS_TIMESTAMPOFFSET = -155
+_TIME2 = struct.Struct("<3H2xI")
+_TIMESTAMPOFFSET = struct.Struct("<6hI2h")
+
+
+def _temporal_fields(value, layout, name):
+    if value is None:
+        return None
+    if (
+        not isinstance(value, (bytes, bytearray, memoryview))
+        or len(value) != layout.size
+    ):
+        raise ValueError(f"Invalid SQL Server {name} value")
+    return layout.unpack(value)
+
+
+def _sqlserver_fraction(nanoseconds):
+    if not 0 <= nanoseconds < 1_000_000_000 or nanoseconds % 100:
+        raise ValueError("Invalid SQL Server temporal fraction")
+    digits = f"{nanoseconds // 100:07d}".rstrip("0")
+    return "." + digits if digits else ""
+
+
+def decode_sqlserver_time2(value):
+    """Decode ODBC SQL_SS_TIME2 without losing SQL Server's seventh digit."""
+    fields = _temporal_fields(value, _TIME2, "time")
+    if fields is None:
+        return None
+    hour, minute, second, nanoseconds = fields
+    clock = time_value(hour, minute, second).isoformat(timespec="seconds")
+    return clock + _sqlserver_fraction(nanoseconds)
+
+
+def decode_sqlserver_datetimeoffset(value):
+    """Decode ODBC's fixed-width structure, preserving precision and offset."""
+    fields = _temporal_fields(value, _TIMESTAMPOFFSET, "datetimeoffset")
+    if fields is None:
+        return None
+    year, month, day, hour, minute, second, nanoseconds, zone_hour, zone_minute = fields
+    offset = zone_hour * 60 + zone_minute
+    if (
+        not -14 <= zone_hour <= 14
+        or not -59 <= zone_minute <= 59
+        or zone_hour * zone_minute < 0
+        or abs(offset) > 14 * 60
+    ):
+        raise ValueError("Invalid SQL Server datetimeoffset timezone")
+    stamp = datetime(year, month, day, hour, minute, second).isoformat(
+        timespec="seconds"
+    )
+    sign = "-" if offset < 0 else "+"
+    return (
+        stamp
+        + _sqlserver_fraction(nanoseconds)
+        + f"{sign}{abs(offset) // 60:02d}:{abs(offset) % 60:02d}"
+    )
 
 
 def now():
@@ -87,7 +146,15 @@ class SQLServerConnection:
             timeout=min(int(cfg.get("timeout", 30)), 60),
             autocommit=False,
         )
-        connection.timeout = int(cfg.get("timeout", 30))
+        try:
+            connection.timeout = int(cfg.get("timeout", 30))
+            connection.add_output_converter(SQL_SS_TIME2, decode_sqlserver_time2)
+            connection.add_output_converter(
+                SQL_SS_TIMESTAMPOFFSET, decode_sqlserver_datetimeoffset
+            )
+        except BaseException:
+            connection.close()
+            raise
         return connection
 
     @contextmanager
@@ -163,7 +230,10 @@ class SQLServerConnection:
         sql = f"INSERT INTO {identifier(schema)}.{identifier(table)} ({', '.join(identifier(c) for c in columns)}) VALUES ({', '.join('?' for _ in columns)})"
         with self.transaction(commit=True) as connection:
             cursor = connection.cursor()
-            cursor.fast_executemany = True
+            # ODBC array binding can infer a too-small buffer for JSON decimal
+            # strings or mixed NULL/date rows. Ordinary bound executemany keeps
+            # the bounded batch atomic without driver-dependent truncation.
+            cursor.fast_executemany = False
             cursor.executemany(
                 sql, [tuple(row[column] for column in columns) for row in rows]
             )

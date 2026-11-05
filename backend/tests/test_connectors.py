@@ -89,6 +89,10 @@ class ODBCConnection:
         self.value = cursor
         self.calls = []
         self.timeout = None
+        self.converters = {}
+
+    def add_output_converter(self, kind, converter):
+        self.converters[kind] = converter
 
     def cursor(self):
         return self.value
@@ -241,7 +245,7 @@ def test_insert_uses_identifiers_and_bound_bulk_rows(monkeypatch):
         "my]schema",
     )
     assert result == {"row_count": 2}
-    assert cursor.fast_executemany
+    assert not cursor.fast_executemany
     operation, sql, values = cursor.calls[0]
     assert (
         operation == "executemany"

@@ -58,7 +58,9 @@ def arrow_type(column):
     if kind == "datetimeoffset":
         return pa.timestamp("us", tz="UTC")
     if kind == "time":
-        return pa.time64("us")
+        # Spark 4 cannot read Parquet TIME; text also preserves all seven
+        # fractional digits instead of narrowing SQL Server time(7) to six.
+        return pa.string()
     if kind in ("binary", "varbinary", "image", "timestamp", "rowversion"):
         return pa.binary()
     if kind in (
@@ -135,6 +137,16 @@ def validate_checkpoint(info, checkpoint, keys):
         raise ValueError(
             "Change Tracking merge keys must match the source table's primary key"
         )
+    if any(
+        column["name"] in keys
+        and column["type"].lower() in ("datetime2", "datetimeoffset")
+        and int(column.get("scale", 0)) > 6
+        for column in info["columns"]
+    ):
+        raise ValueError(
+            "Change Tracking timestamp primary keys must have precision at most 6; "
+            "Spark timestamps cannot distinguish SQL Server's seventh fractional digit"
+        )
     if checkpoint is None:
         return
     if (
@@ -189,7 +201,12 @@ def snapshot_to_parquet(
             name = item["name"]
             alias = "ct" if checkpoint is not None and name in keys else "s"
             value = alias + "." + identifier(name)
-            if item["type"].lower() in ("datetimeoffset", "xml", "uniqueidentifier"):
+            if item["type"].lower() in (
+                "time",
+                "datetimeoffset",
+                "xml",
+                "uniqueidentifier",
+            ):
                 value = "CONVERT(nvarchar(max)," + value + ",127)"
             expressions.append(value + " AS " + identifier(name))
         if checkpoint is None:
