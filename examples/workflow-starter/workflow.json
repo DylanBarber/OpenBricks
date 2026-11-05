@@ -1,0 +1,62 @@
+{
+  "name": "Parameterized bronze to silver demo",
+  "project_id": "default",
+  "parameter_definitions": [
+    {
+      "name": "run_date",
+      "type": "date",
+      "default": "2026-01-01",
+      "required": true
+    },
+    {
+      "name": "region",
+      "type": "string",
+      "default": "All",
+      "choices": [
+        "All",
+        "North",
+        "South"
+      ]
+    },
+    {
+      "name": "minimum_rows",
+      "type": "integer",
+      "default": 1
+    }
+  ],
+  "parameters": {},
+  "tasks": [
+    {
+      "key": "bronze",
+      "notebook_id": "BRONZE_NOTEBOOK_ID",
+      "depends_on": [],
+      "cluster_id": "local",
+      "parameters": {
+        "run_date": "${params.run_date}",
+        "region": "${params.region}",
+        "minimum_rows": "${params.minimum_rows}"
+      },
+      "timeout_seconds": 300,
+      "max_retries": 1,
+      "retry_delay_seconds": 5,
+      "retry_safe": true
+    },
+    {
+      "key": "silver",
+      "notebook_id": "SILVER_NOTEBOOK_ID",
+      "depends_on": [
+        "bronze"
+      ],
+      "cluster_id": "local",
+      "parameters": {
+        "run_date": "${params.run_date}",
+        "region": "${params.region}",
+        "minimum_rows": "${params.minimum_rows}"
+      },
+      "timeout_seconds": 300,
+      "max_retries": 1,
+      "retry_delay_seconds": 5,
+      "retry_safe": true
+    }
+  ]
+}

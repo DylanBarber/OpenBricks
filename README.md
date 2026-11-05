@@ -4,6 +4,8 @@
 
 **An open home for your data work.**
 
+Pre-release: **0.3.0-beta.1**. Build from source with the quickstart below. Versioned images and artifacts are produced by the [release workflow](docs/RELEASING.md); verify the actual release before assuming an image tag is published.
+
 A self-hosted notebook workspace for Python, Spark SQL, and scheduled data pipelines. OpenBricks brings notebooks, Git imports, reusable Python packages, object storage, and compute management into one browser UI.
 
 Start with two Docker containers on one computer. Add trusted remote compute hosts when you need more room. Keep your files on your own infrastructure, with no cloud account required.
@@ -15,6 +17,8 @@ Start with two Docker containers on one computer. Add trusted remote compute hos
 
 - [Meet the workspace](#meet-the-workspace)
 - [Your first notebook](#your-first-notebook)
+- [Editor, parameters, and revisions](#editor-parameters-and-revisions)
+- [Workflows, releases, and reruns](#workflows-releases-and-reruns)
 - [From Git to a scheduled pipeline](#from-git-to-a-scheduled-pipeline)
 - [Example projects](#example-projects)
 - [Reusable Python packages](#reusable-python-packages)
@@ -24,6 +28,8 @@ Start with two Docker containers on one computer. Add trusted remote compute hos
 - [Architecture and remote compute](#architecture-and-remote-compute)
 - [Memory and sessions](#memory-and-session-behavior)
 - [Persistence, backups, and portability](#persistence-backups-and-portability)
+- [Operations and notifications](#operations-and-notifications)
+- [Projects and access](docs/PROJECTS.md)
 - [Trust model and boundaries](#trust-model-and-current-boundaries)
 - [Development](#development)
 - [FAQ](#faq)
@@ -50,17 +56,20 @@ The screenshot shows the bundled starter's SQL report, executed with synthetic d
 
 | Capability | What you can do |
 | --- | --- |
-| Notebooks | Create Python, Spark SQL, and Markdown cells; run cells or whole notebooks; inspect tables, text, errors, and run details |
+| Notebooks and editor | Mix Python, Spark SQL, and Markdown; use highlighting, completion suggestions, formatting, tabs, notebook-wide find/replace, and source revisions |
+| Parameters | Define typed defaults/required inputs, override them for manual or scheduled runs, and use a limited widgets compatibility helper |
 | Workspace folders | Create nested directories, follow breadcrumbs, search, rename, and move notebooks or folders |
-| Git | Clone HTTPS/SSH repositories, pull updates, and import notebook files while preserving directories |
-| Python packages | Build wheels from Git projects or upload wheels; synchronize installed wheel artifacts to remote compute |
-| Scheduling | Use Basic hourly/daily/weekly controls or Advanced cron, with timezones and a compute target |
-| Run history | Start with notebook summaries, then page and filter that notebook's runs; load outputs when opening a run |
-| SQL Server | Save named connections for reads, parameterized execution, inserts, and bounded conversion to Spark |
-| Object storage | Browse filesystem-backed buckets or S3-compatible endpoints, including optional local SeaweedFS |
-| Compute | Separate management and execution containers; register and test remote compute services |
-| Data catalog | Optionally browse Unity Catalog OSS, create catalogs/schemas, and register external tables |
-| Team and appearance | Administrator/member accounts and System, Light, or Dark themes |
+| Git and releases | Clone/pull/import notebook repositories, capture exact committed sources, compare releases, and run pinned notebook paths |
+| Python packages | Build/upload wheels, capture content-addressed package environments, and synchronize required artifacts to compute |
+| Workflows | Connect notebooks in a dependency graph with per-step compute/timeouts, explicit safe retries, and captured-source repair/rerun |
+| Scheduling | Schedule notebooks or workflows with Basic hourly/daily/weekly controls or Advanced cron and timezones |
+| Runs | Page notebook/workflow histories and inspect cell progress, bounded live logs, results, peak interpreter memory, and provenance |
+| Data workspace | Explore sources, save parameterized SQL queries, inspect history/previews, and draw simple charts from bounded results |
+| Data quality and Delta | Run checks, record lineage, inspect/time-travel/maintain Delta tables, and define incremental SQL Server-to-Delta imports |
+| SQL Server and storage | Use named SQL Server connections, local filesystem buckets, or S3-compatible endpoints including optional SeaweedFS |
+| Compute and catalog | Manage separate local/remote execution targets and optionally use Unity Catalog OSS shared metadata |
+| Projects and appearance | Assign viewer/operator/editor/owner roles and selected notebook connections; use System, Light, or Dark themes |
+| Operations | Inspect resources, manage retention and local backups/restore, and configure encrypted webhook/SMTP alert destinations |
 
 ## Quick start
 
@@ -150,9 +159,27 @@ FROM people
 ORDER BY id
 ~~~
 
-Python cells expose `spark`, `sc`, `display`, `blob`, `dbutils.fs`, `connections`, and `catalog`. A Python cell beginning with `%sql` also runs as SQL. Import Jupyter `.ipynb`, Databricks source `.py`, or `.sql` notebooks, and download edited notebooks as `.ipynb`.
+Python cells expose `spark`, `sc`, `display`, `blob`, `dbutils.fs`, `dbutils.widgets`, `params`, `connections`, `catalog`, and the `data` helpers. A Python cell beginning with `%sql` also runs as SQL. Import Jupyter `.ipynb`, Databricks source `.py`, or `.sql` notebooks, and download edited notebooks as `.ipynb`.
 
 Individual cell runs retain that notebook's Python variables while its compute interpreter remains active. **Run all** starts a fresh Python namespace. Spark temporary views share the compute service's Spark session, so choose distinct names across projects. See [memory and sessions](#memory-and-session-behavior) for idle shutdown and resets.
+
+## Editor, parameters, and revisions
+
+The client-loaded CodeMirror editor provides Python/SQL/Markdown highlighting, completion suggestions, cell formatting, and multiple notebook tabs. **Find across all cells** locates notebook-wide matches; replacement is case-sensitive. Python formatting uses Black on management, while SQL and Markdown formatting load in the browser. This is a focused notebook editor, not a full language-server IDE.
+
+In **Notebook settings**, define typed parameters (`string`, `integer`, `number`, `boolean`, ISO `date`, or `json`) with defaults/required flags, then save. **Run options** supplies overrides and an optional package environment/compute target. Code reads values from `params["name"]`. A limited `dbutils.widgets` helper offers string-based compatibility for existing notebooks; it does not reproduce Databricks' widget toolbar.
+
+**Revisions** compares source saves/imports against the current notebook and restores an older source as a new version. The newest 50 revisions per notebook are retained. A revision restores source, rather than a dataset or interpreter state. See [parameters, workflows, and snapshots](docs/WORKFLOWS.md).
+
+## Workflows, releases, and reruns
+
+Open **Workflows → New workflow**, add notebook steps, and connect them through **Runs after** dependencies. Each step can select a workspace notebook or immutable release/path, compute, parameter overrides, timeout, and retry policy. Steps wait for successful dependencies; independent work can run on different compute targets. Use persisted datasets to exchange results between steps.
+
+Retries are disabled unless you explicitly mark a step's writes safe to retry. Unknown execution outcomes are excluded from automatic retries. Workflow history shows step attempts and notebook logs; **Restart failed steps** creates a new run from the original captured sources/environments and preserves unaffected successful steps. Reconcile external effects before manually replacing uncertain work.
+
+Under **Releases & environments**, capture installed wheel hashes and a runtime identity, then create a Git release from an exact commit and selected notebook paths. Compare or run releases directly, or use them in workflow steps. Every new notebook run captures source, resolved parameters, and a wheel manifest; **Rerun captured source** uses that snapshot. Legacy runs without snapshots cannot use it. Compatible runtime images and external data remain your responsibility.
+
+Follow the [workflow guide](docs/WORKFLOWS.md), or try the [parameterized quality-check example](examples/workflow-starter/) after the original starter below.
 
 ## From Git to a scheduled pipeline
 
@@ -214,7 +241,7 @@ Open `00_run_pipeline.py`, displayed as **00 run pipeline**, select compute, and
 
 The supplied nine-row fixture produces six valid orders, two quarantined orders, and five completed orders totaling **85.50**. The notebook asserts those results, and a second run replaces outputs without adding duplicates.
 
-The layer notebooks let you explore individual stages. Schedule the complete pipeline notebook for repeatable end-to-end execution.
+The layer notebooks let you explore individual stages. Schedule the complete pipeline notebook for repeatable end-to-end execution, or create a multi-step workflow from the layer notebooks. The SQL report must run after gold on the same compute/local metastore, unless you configure shared catalog/storage access.
 
 ### 5. Schedule it
 
@@ -240,6 +267,7 @@ Private repositories use the management server's Git credentials or SSH keys and
 | [Notebook repository starter](examples/notebook-repo/) | A self-contained medallion-style pipeline, wheel, packaged data, and notebook folders |
 | [Hello Spark](examples/hello_spark.py) | A small Databricks source notebook to import and run |
 | [Brickkit](examples/brickkit/) | A minimal Python wheel for reusable notebook functions |
+| [Parameterized workflow starter](examples/workflow-starter/) | Two idempotent Python notebooks with typed inputs, quality checks, lineage, and an installable workflow definition |
 | [External example repositories](docs/EXAMPLE_REPOSITORIES.md) | Curated projects with format, dependency, and adaptation notes |
 
 The starter is the best first import because its code and data are designed for this runtime. External examples may require packages, datasets, credentials, or changes to platform-specific APIs.
@@ -270,7 +298,7 @@ print(normalize_name("  ada   lovelace "))
 # Ada Lovelace
 ~~~
 
-Wheels install persistently into `/data/site-packages`. Before remote execution, management transfers installed wheel artifacts to the selected compute service. **Raw Git checkouts and arbitrary local files are not replicated.** Package reusable code and small resources into wheels; use shared object storage for larger datasets.
+Package installation maintains the current package set in `/data/site-packages`. Runs capture its wheel artifacts by content hash and prepare a pinned environment under `/data/environments`; retained artifacts live under `/data/artifacts/wheels`. Before remote execution, management transfers the artifacts required by that environment to the selected compute service. **Raw Git checkouts and arbitrary local files are not replicated.** Package reusable code and small resources into wheels; use shared object storage for larger datasets.
 
 Installation uses `--no-index --no-deps`, and builds use `--no-isolation`. Supply dependency wheels and required build backends explicitly. Native wheels must match Linux, Python 3.12, and the image's architecture. Package changes require idle execution environments and reset their interpreters so updated modules load consistently.
 
@@ -284,13 +312,15 @@ Installation uses `--no-index --no-deps`, and builds use `--no-isolation`. Suppl
 | `*/15 * * * *` | Every 15 minutes |
 | `0 0 1 * *` | Midnight on the first day of each month |
 
-Jobs retain their scheduling mode, show the next trigger, and support editing, enable/disable, and **Run now**. Choose an IANA timezone such as `America/New_York`; daylight-saving rules apply. A job can use its notebook's compute target or override it.
+Jobs retain their scheduling mode, show the next trigger, and support editing, enable/disable, and **Run now**. Choose an IANA timezone such as `America/New_York`; daylight-saving rules apply. A notebook job can use its notebook's compute target or override it. Workflow jobs are created through a workflow's **Add schedule** action; each step has its own execution settings. Both targets support typed parameter overrides and configured notification destinations.
 
 Schedules continue with the browser closed while management and compute are available. Missed triggers while management is stopped are not replayed.
 
-**Run history** groups by notebook, then provides paginated run lists and status filters. Opening a run loads its outputs. Workspace/history pages fetch summaries instead of every notebook cell or historical result, so frequently scheduled notebooks do not crowd a single flat history list.
+**Run history** groups by notebook, then provides paginated run lists and status filters. Opening a run loads its outputs. Workspace/history pages fetch summaries instead of every notebook cell or historical result, so frequently scheduled notebooks do not crowd a single flat history list. Workflow history is available from each workflow and links to its underlying notebook runs. Retention can expire outputs separately from run metadata; see [Operations](docs/OPERATIONS.md).
 
 ## Connect your data
+
+**Data workspace** combines a SQL editor, project-scoped saved queries/history, metadata browsing, row previews, and simple charts. Spark and SQL Server operations are queued on the selected compute. It also provides quality checks/reports, recorded lineage, Delta history/time travel/maintenance, and key-based incremental SQL Server ingestion. See [the data guide](docs/DATA_WORKSPACE.md) for exact helpers and limits. Previews are bounded, lineage is not a universal interception layer, and watermark ingestion is not CDC.
 
 ### Microsoft SQL Server
 
@@ -298,7 +328,7 @@ In **Connections**, add a named **SQL Server** connection with server, port, dat
 
 Encryption and certificate verification default to enabled. The database must be reachable from the selected compute host. Inside a container, `localhost` means that container; use the database's reachable address or Docker Desktop's `host.docker.internal` where applicable.
 
-With a saved connection named `Reporting` and the referenced tables already created:
+Make the connection available to the selected project, then select it in **Notebook settings → Notebook connections** and save. Empty notebook connection selections expose no saved connector credentials. With a selected connection named `Reporting` and the referenced tables already created:
 
 ~~~python
 db = connections.sqlserver("Reporting")
@@ -320,7 +350,7 @@ db.insert(
 )
 ~~~
 
-Values use ODBC `?` parameters. Explicit writes commit on success and roll back on error. `read_table(...)` reads an existing table, `query(...)` returns columns/rows metadata, and `to_spark(...)` offers bounded conversion for small result sets. Plan larger transfers in batches.
+Values use ODBC `?` parameters. Explicit writes commit on success and roll back on error. `read_table(...)` reads an existing table, `query(...)` returns columns/rows metadata, and `to_spark(...)` offers bounded conversion for small result sets. Use native `read_spark(...)` JDBC reads and the documented ingestion workflow for larger transfers; see [Data workspace](docs/DATA_WORKSPACE.md).
 
 The connector has automated parameter-binding and transaction coverage. A live SQL Server round trip remains outside the current [verification record](VERIFICATION.md).
 
@@ -337,7 +367,7 @@ OPENBRICKS_S3_SECRET_KEY=your-unique-secret-key
 
 Run `docker compose up -d`. It creates the `openbricks` bucket and appears as **Local SeaweedFS** in Connections/Object storage. The host endpoint defaults to `http://127.0.0.1:8333`; containers use `http://seaweedfs:8333`.
 
-You can also add named S3 connections to existing local or remote compatible services. Browse buckets/prefixes, upload/download objects, and page listings with continuation tokens.
+Select **Local SeaweedFS** in notebook settings before using its named connection helper. You can also add named S3 connections to existing local or remote compatible services. Browse buckets/prefixes, upload/download objects, and page listings with continuation tokens.
 
 ~~~python
 storage = connections.s3("Local SeaweedFS")
@@ -473,17 +503,23 @@ docker save openbricks:local openbricks-compute:local -o openbricks-images.tar
 docker load -i openbricks-images.tar
 ~~~
 
-Images contain runtimes, not data volumes. Transfer Compose/configuration files and volume backups separately. See [backup guidance](DEPLOYMENT.md#trust-secrets-and-backups).
+Images contain runtimes, not data volumes. Transfer Compose/configuration files and backups separately. Administrators can create/download local workspace archives through **Operations**, optionally encrypted with a passphrase. Restore replaces local content and requires management/local compute to reload. External S3/SeaweedFS data, catalog databases, remote compute data, server environment, and images require separate backups. The default restore upload allowance is `OPENBRICKS_MAX_UPLOAD_MB=100`; larger archives require matching API/proxy configuration. Follow [Operations](docs/OPERATIONS.md) before relying on this recovery path.
+
+## Operations and notifications
+
+**Operations** shows resource/queue health and manages output/run retention, local backup/restore, and notification targets. The default policy keeps outputs for 30 days, run records for 90 days, an output budget of 500 MB, and five newest backups. Preview cleanup before applying it; background cleanup runs approximately hourly.
+
+Configure project webhook or SMTP targets for failed, slow, or successful runs, then attach them to jobs/workflows. Full webhook URLs, bearer tokens, and SMTP passwords are encrypted at rest; the UI displays a webhook's origin and preserves hidden values when fields are left blank. **Send test** sends a real notification. Container memory limits remain host configuration. See the [operations guide](docs/OPERATIONS.md) for retention effects, archive limits, restore maintenance/restart behavior, and delivery boundaries.
 
 ## Trust model and current boundaries
 
-OpenBricks is for a **trusted team**. Notebook/package code executes with the selected service account's access. Members can use shared connections with those saved accounts' permissions. Administrators manage accounts, connections, and compute configuration.
+OpenBricks is for a **trusted team**. Notebook/package code executes with the selected service account's access. Project viewer/operator/editor/owner roles govern browsing, execution, edits, and membership. Administrators manage global accounts, connection/compute assignments, and operations. These are trusted-team API controls, not filesystem, Spark-session, or untrusted-code isolation. See [Projects & access](docs/PROJECTS.md).
 
-Registered compute hosts receive notebook source and saved workspace connection definitions, including credentials. Delivery is not scoped per notebook. Register trusted hosts, use HTTPS remotely, and grant database/storage accounts the access your team needs.
+Registered compute hosts receive notebook source and the notebook's explicitly selected, project-available connection definitions/credentials. Empty selections dispatch no saved connector credentials. Current permissions and credential values are rechecked when work is dispatched; snapshots do not freeze secrets. Register trusted hosts, use HTTPS remotely, and grant underlying database/storage accounts only the access the team needs.
 
 Current boundaries include:
 
-- No per-notebook ACL model, enterprise SSO, or isolation between untrusted notebook authors.
+- Project-scoped access and notebook credential selection, rather than per-notebook ACL administration, enterprise SSO, or isolation between untrusted notebook authors.
 - No automatic infrastructure provisioning, Spark autoscaling, or general Databricks API compatibility.
 - Python and Spark SQL execution; Scala and R kernels are not included.
 - Git import creates workspace copies; there is no UI commit/push workflow.

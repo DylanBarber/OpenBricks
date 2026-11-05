@@ -1,40 +1,423 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
-import { ArrowDownToLine, ArrowLeft, ArrowRight, CheckCircle2, ChevronRight, Cloud, Database, FileCode2, Pencil, Play, Plus, RefreshCw, Search, ShieldCheck, Terminal, Trash2, Upload } from "lucide-react";
-import { api, bytes, date, json, type Connection, type QueryResult, type StorageObject } from "@/lib/api";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type FormEvent,
+} from "react";
+import {
+  ArrowDownToLine,
+  ArrowLeft,
+  ArrowRight,
+  CheckCircle2,
+  ChevronRight,
+  Cloud,
+  Database,
+  FileCode2,
+  Pencil,
+  Play,
+  Plus,
+  RefreshCw,
+  Search,
+  ShieldCheck,
+  Terminal,
+  Trash2,
+  Upload,
+} from "lucide-react";
+import {
+  api,
+  bytes,
+  date,
+  json,
+  type Connection,
+  type QueryResult,
+  type StorageObject,
+} from "@/lib/api";
 import { Empty, Field, Modal, SectionHead, Spinner } from "./ui";
 
-type TestResult = { ok: boolean; message: string; details?: Record<string, unknown> };
-type BucketPage = { items: { name: string; created_at?: string }[]; next_token?: string | null };
-type ObjectPage = { items: StorageObject[]; prefixes: string[]; next_token: string | null };
+type TestResult = {
+  ok: boolean;
+  message: string;
+  details?: Record<string, unknown>;
+};
+type BucketPage = {
+  items: { name: string; created_at?: string }[];
+  next_token?: string | null;
+};
+type ObjectPage = {
+  items: StorageObject[];
+  prefixes: string[];
+  next_token: string | null;
+};
 
 export function ResultTable({ result }: { result: QueryResult }) {
-  return <div className="query-result"><div className="query-result-summary"><CheckCircle2 size={14} />{result.rows?.length || 0} rows{result.truncated ? " · Preview limit reached" : ""}</div><div className="table-scroll"><table className="data-table result-table"><thead><tr>{result.columns.map((column, index) => <th key={`${column}-${index}`}>{column}</th>)}</tr></thead><tbody>{result.rows.map((row, index) => <tr key={index}>{row.map((value, column) => <td key={column}>{value === null ? <em className="muted">null</em> : typeof value === "object" ? JSON.stringify(value) : String(value)}</td>)}</tr>)}</tbody></table></div></div>;
+  return (
+    <div className="query-result">
+      <div className="query-result-summary">
+        <CheckCircle2 size={14} />
+        {result.rows?.length || 0} rows
+        {result.truncated ? " · Preview limit reached" : ""}
+      </div>
+      <div className="table-scroll">
+        <table className="data-table result-table">
+          <thead>
+            <tr>
+              {result.columns.map((column, index) => (
+                <th key={`${column}-${index}`}>{column}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {result.rows.map((row, index) => (
+              <tr key={index}>
+                {row.map((value, column) => (
+                  <td key={column}>
+                    {value === null ? (
+                      <em className="muted">null</em>
+                    ) : typeof value === "object" ? (
+                      JSON.stringify(value)
+                    ) : (
+                      String(value)
+                    )}
+                  </td>
+                ))}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
 }
 
-function ConnectionForm({ connection, initialType, onSaved, onClose }: { connection: Connection | null; initialType: Connection["type"]; onSaved: () => void; onClose: () => void }) {
-  const [type, setType] = useState<Connection["type"]>(connection?.type || initialType);
+function ConnectionForm({
+  connection,
+  initialType,
+  onSaved,
+  onClose,
+}: {
+  connection: Connection | null;
+  initialType: Connection["type"];
+  onSaved: () => void;
+  onClose: () => void;
+}) {
+  const [type, setType] = useState<Connection["type"]>(
+    connection?.type || initialType,
+  );
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const config = connection?.config || {};
   async function submit(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault(); const values = new FormData(event.currentTarget); setBusy(true); setError("");
+    event.preventDefault();
+    const values = new FormData(event.currentTarget);
+    setBusy(true);
+    setError("");
     const secrets: Record<string, string | null> = {};
-    for (const field of type === "sqlserver" ? ["password"] : ["access_key", "secret_key", "session_token"]) { const value = values.get(field); if (typeof value === "string" && value) secrets[field] = value; }
-    if (type === "s3" && values.has("clear_session_token")) secrets.session_token = null;
-    const body = { name: values.get("name"), type, secrets, config: type === "sqlserver" ? { server: values.get("server"), port: Number(values.get("port")), database: values.get("database"), username: values.get("username"), encrypt: values.has("encrypt"), trust_server_certificate: values.has("trust_server_certificate"), timeout: Number(values.get("timeout")) } : { endpoint_url: values.get("endpoint_url"), region: values.get("region"), addressing_style: values.get("addressing_style"), verify_tls: values.has("verify_tls") } };
-    try { await api(connection ? `/connections/${connection.id}` : "/connections", json(connection ? "PUT" : "POST", body)); onSaved(); onClose(); }
-    catch (failure) { setError((failure as Error).message); } finally { setBusy(false); }
+    for (const field of type === "sqlserver"
+      ? ["password"]
+      : ["access_key", "secret_key", "session_token"]) {
+      const value = values.get(field);
+      if (typeof value === "string" && value) secrets[field] = value;
+    }
+    if (type === "s3" && values.has("clear_session_token"))
+      secrets.session_token = null;
+    const body = {
+      project_ids: connection?.project_ids || ["default"],
+      name: values.get("name"),
+      type,
+      secrets,
+      config:
+        type === "sqlserver"
+          ? {
+              server: values.get("server"),
+              port: Number(values.get("port")),
+              database: values.get("database"),
+              username: values.get("username"),
+              encrypt: values.has("encrypt"),
+              trust_server_certificate: values.has("trust_server_certificate"),
+              timeout: Number(values.get("timeout")),
+            }
+          : {
+              endpoint_url: values.get("endpoint_url"),
+              region: values.get("region"),
+              addressing_style: values.get("addressing_style"),
+              verify_tls: values.has("verify_tls"),
+            },
+    };
+    try {
+      await api(
+        connection ? `/connections/${connection.id}` : "/connections",
+        json(connection ? "PUT" : "POST", body),
+      );
+      onSaved();
+      onClose();
+    } catch (failure) {
+      setError((failure as Error).message);
+    } finally {
+      setBusy(false);
+    }
   }
-  return <Modal title={connection ? `Edit ${connection.name}` : "Create a connection"} onClose={() => { if (!busy) onClose(); }} wide><form className="modal-form connection-form" onSubmit={submit}><div className="form-grid"><Field label="Connection name"><input name="name" required autoFocus maxLength={100} defaultValue={connection?.name || ""} placeholder={type === "sqlserver" ? "Warehouse SQL Server" : "Shared object storage"} /></Field><Field label="Connection type"><select value={type} disabled={!!connection} onChange={event => setType(event.target.value as Connection["type"])}><option value="sqlserver">Microsoft SQL Server</option><option value="s3">S3-compatible object storage</option></select></Field></div>
-    {type === "sqlserver" ? <><div className="form-grid connection-server-fields"><Field label="Server or hostname"><input name="server" required defaultValue={String(config.server || "")} placeholder="sql.example.com" /></Field><Field label="Port"><input name="port" required type="number" min={1} max={65535} defaultValue={Number(config.port || 1433)} /></Field></div><div className="form-grid"><Field label="Database"><input name="database" required defaultValue={String(config.database || "")} placeholder="analytics" /></Field><Field label="Username"><input name="username" required autoComplete="off" defaultValue={String(config.username || "")} placeholder="openbricks_user" /></Field></div><Field label="Password" hint={connection ? "Leave blank to keep the saved password." : "The password is stored securely on the server."}><input name="password" type="password" required={!connection} autoComplete="new-password" placeholder={connection ? "Saved password is hidden" : "SQL Server password"} /></Field><Field label="Connection timeout (seconds)"><input name="timeout" type="number" min={1} max={300} required defaultValue={Number(config.timeout || 30)} /></Field><label className="checkbox-field"><input name="encrypt" type="checkbox" defaultChecked={config.encrypt !== false} /><span>Encrypt the SQL Server connection</span></label><label className="checkbox-field"><input name="trust_server_certificate" type="checkbox" defaultChecked={config.trust_server_certificate === true} /><span>Trust the server certificate without validating its authority</span></label></> : <><Field label="S3 endpoint URL" hint="Use a local SeaweedFS endpoint or a remote S3-compatible service."><input type="url" name="endpoint_url" required defaultValue={String(config.endpoint_url || "")} placeholder="https://objects.example.com" /></Field><div className="form-grid"><Field label="Region"><input name="region" required defaultValue={String(config.region || "us-east-1")} /></Field><Field label="Addressing style"><select name="addressing_style" defaultValue={String(config.addressing_style || "path")}><option value="path">Path style</option><option value="virtual">Virtual-host style</option><option value="auto">Automatic</option></select></Field></div><div className="form-grid"><Field label="Access key" hint={connection ? "Leave blank to keep the saved key." : undefined}><input name="access_key" type="password" autoComplete="new-password" required={!connection} placeholder={connection ? "Saved key is hidden" : "Access key ID"} /></Field><Field label="Secret key" hint={connection ? "Leave blank to keep the saved secret." : undefined}><input name="secret_key" type="password" autoComplete="new-password" required={!connection} placeholder={connection ? "Saved secret is hidden" : "Secret access key"} /></Field></div><Field label="Session token (optional)"><input name="session_token" type="password" autoComplete="new-password" placeholder={connection ? "Leave blank to keep the saved token" : "For temporary credentials"} /></Field>{connection?.secret_fields?.includes("session_token") ? <label className="checkbox-field"><input name="clear_session_token" type="checkbox" /><span>Remove the saved session token</span></label> : null}<label className="checkbox-field"><input name="verify_tls" type="checkbox" defaultChecked={config.verify_tls !== false} /><span>Verify TLS certificates</span></label></>}
-    {error ? <div className="inline-error" role="alert">{error}</div> : null}<div className="modal-footer"><button className="button" type="button" disabled={busy} onClick={onClose}>Cancel</button><button className="button primary" disabled={busy}>{busy ? <Spinner /> : <Plus size={15} />}{connection ? "Save connection" : "Create connection"}</button></div></form></Modal>;
+  return (
+    <Modal
+      title={connection ? `Edit ${connection.name}` : "Create a connection"}
+      onClose={() => {
+        if (!busy) onClose();
+      }}
+      wide
+    >
+      <form className="modal-form connection-form" onSubmit={submit}>
+        <div className="form-grid">
+          <Field label="Connection name">
+            <input
+              name="name"
+              required
+              autoFocus
+              maxLength={100}
+              defaultValue={connection?.name || ""}
+              placeholder={
+                type === "sqlserver"
+                  ? "Warehouse SQL Server"
+                  : "Shared object storage"
+              }
+            />
+          </Field>
+          <Field label="Connection type">
+            <select
+              value={type}
+              disabled={!!connection}
+              onChange={(event) =>
+                setType(event.target.value as Connection["type"])
+              }
+            >
+              <option value="sqlserver">Microsoft SQL Server</option>
+              <option value="s3">S3-compatible object storage</option>
+            </select>
+          </Field>
+        </div>
+        {type === "sqlserver" ? (
+          <>
+            <div className="form-grid connection-server-fields">
+              <Field label="Server or hostname">
+                <input
+                  name="server"
+                  required
+                  defaultValue={String(config.server || "")}
+                  placeholder="sql.example.com"
+                />
+              </Field>
+              <Field label="Port">
+                <input
+                  name="port"
+                  required
+                  type="number"
+                  min={1}
+                  max={65535}
+                  defaultValue={Number(config.port || 1433)}
+                />
+              </Field>
+            </div>
+            <div className="form-grid">
+              <Field label="Database">
+                <input
+                  name="database"
+                  required
+                  defaultValue={String(config.database || "")}
+                  placeholder="analytics"
+                />
+              </Field>
+              <Field label="Username">
+                <input
+                  name="username"
+                  required
+                  autoComplete="off"
+                  defaultValue={String(config.username || "")}
+                  placeholder="openbricks_user"
+                />
+              </Field>
+            </div>
+            <Field
+              label="Password"
+              hint={
+                connection
+                  ? "Leave blank to keep the saved password."
+                  : "The password is stored securely on the server."
+              }
+            >
+              <input
+                name="password"
+                type="password"
+                required={!connection}
+                autoComplete="new-password"
+                placeholder={
+                  connection
+                    ? "Saved password is hidden"
+                    : "SQL Server password"
+                }
+              />
+            </Field>
+            <Field label="Connection timeout (seconds)">
+              <input
+                name="timeout"
+                type="number"
+                min={1}
+                max={300}
+                required
+                defaultValue={Number(config.timeout || 30)}
+              />
+            </Field>
+            <label className="checkbox-field">
+              <input
+                name="encrypt"
+                type="checkbox"
+                defaultChecked={config.encrypt !== false}
+              />
+              <span>Encrypt the SQL Server connection</span>
+            </label>
+            <label className="checkbox-field">
+              <input
+                name="trust_server_certificate"
+                type="checkbox"
+                defaultChecked={config.trust_server_certificate === true}
+              />
+              <span>
+                Trust the server certificate without validating its authority
+              </span>
+            </label>
+          </>
+        ) : (
+          <>
+            <Field
+              label="S3 endpoint URL"
+              hint="Use a local SeaweedFS endpoint or a remote S3-compatible service."
+            >
+              <input
+                type="url"
+                name="endpoint_url"
+                required
+                defaultValue={String(config.endpoint_url || "")}
+                placeholder="https://objects.example.com"
+              />
+            </Field>
+            <div className="form-grid">
+              <Field label="Region">
+                <input
+                  name="region"
+                  required
+                  defaultValue={String(config.region || "us-east-1")}
+                />
+              </Field>
+              <Field label="Addressing style">
+                <select
+                  name="addressing_style"
+                  defaultValue={String(config.addressing_style || "path")}
+                >
+                  <option value="path">Path style</option>
+                  <option value="virtual">Virtual-host style</option>
+                  <option value="auto">Automatic</option>
+                </select>
+              </Field>
+            </div>
+            <div className="form-grid">
+              <Field
+                label="Access key"
+                hint={
+                  connection ? "Leave blank to keep the saved key." : undefined
+                }
+              >
+                <input
+                  name="access_key"
+                  type="password"
+                  autoComplete="new-password"
+                  required={!connection}
+                  placeholder={
+                    connection ? "Saved key is hidden" : "Access key ID"
+                  }
+                />
+              </Field>
+              <Field
+                label="Secret key"
+                hint={
+                  connection
+                    ? "Leave blank to keep the saved secret."
+                    : undefined
+                }
+              >
+                <input
+                  name="secret_key"
+                  type="password"
+                  autoComplete="new-password"
+                  required={!connection}
+                  placeholder={
+                    connection ? "Saved secret is hidden" : "Secret access key"
+                  }
+                />
+              </Field>
+            </div>
+            <Field label="Session token (optional)">
+              <input
+                name="session_token"
+                type="password"
+                autoComplete="new-password"
+                placeholder={
+                  connection
+                    ? "Leave blank to keep the saved token"
+                    : "For temporary credentials"
+                }
+              />
+            </Field>
+            {connection?.secret_fields?.includes("session_token") ? (
+              <label className="checkbox-field">
+                <input name="clear_session_token" type="checkbox" />
+                <span>Remove the saved session token</span>
+              </label>
+            ) : null}
+            <label className="checkbox-field">
+              <input
+                name="verify_tls"
+                type="checkbox"
+                defaultChecked={config.verify_tls !== false}
+              />
+              <span>Verify TLS certificates</span>
+            </label>
+          </>
+        )}
+        {error ? (
+          <div className="inline-error" role="alert">
+            {error}
+          </div>
+        ) : null}
+        <div className="modal-footer">
+          <button
+            className="button"
+            type="button"
+            disabled={busy}
+            onClick={onClose}
+          >
+            Cancel
+          </button>
+          <button className="button primary" disabled={busy}>
+            {busy ? <Spinner /> : <Plus size={15} />}
+            {connection ? "Save connection" : "Create connection"}
+          </button>
+        </div>
+      </form>
+    </Modal>
+  );
 }
 
-function SqlConsole({ connection, onClose }: { connection: Connection; onClose: () => void }) {
+function SqlConsole({
+  connection,
+  onClose,
+}: {
+  connection: Connection;
+  onClose: () => void;
+}) {
   const [mode, setMode] = useState<"query" | "execute" | "insert">("query");
-  const [sql, setSql] = useState("SELECT TOP (100) * FROM INFORMATION_SCHEMA.TABLES;");
+  const [sql, setSql] = useState(
+    "SELECT TOP (100) * FROM INFORMATION_SCHEMA.TABLES;",
+  );
   const [parameters, setParameters] = useState("[]");
   const [rows, setRows] = useState('[\n  {"id": 1, "name": "Example"}\n]');
   const [result, setResult] = useState<QueryResult | null>(null);
@@ -42,22 +425,194 @@ function SqlConsole({ connection, onClose }: { connection: Connection; onClose: 
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   async function execute(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault(); setBusy(true); setError(""); setMessage(""); setResult(null);
+    event.preventDefault();
+    setBusy(true);
+    setError("");
+    setMessage("");
+    setResult(null);
     try {
       const values = new FormData(event.currentTarget);
       const params: unknown = mode === "insert" ? [] : JSON.parse(parameters);
-      if (!Array.isArray(params)) throw new Error("Parameters must be a JSON array.");
+      if (!Array.isArray(params))
+        throw new Error("Parameters must be a JSON array.");
       let payload: Record<string, unknown> = { sql, params };
-      if (mode === "insert") { const valuesToInsert: unknown = JSON.parse(rows); if (!Array.isArray(valuesToInsert) || !valuesToInsert.length || valuesToInsert.some(row => typeof row !== "object" || row === null || Array.isArray(row))) throw new Error("Rows must be a nonempty JSON array of objects."); payload = { table: values.get("table"), schema: values.get("schema"), rows: valuesToInsert }; }
-      const output = await api<QueryResult>(`/connections/${connection.id}/${mode}`, json("POST", payload));
-      if (mode === "query") setResult(output); else setMessage(`${mode === "insert" ? "Insert" : "Command"} completed. ${output.row_count != null && output.row_count >= 0 ? `${output.row_count.toLocaleString()} rows affected.` : "Transaction committed."}`);
-    } catch (failure) { setError((failure as Error).message); } finally { setBusy(false); }
+      if (mode === "insert") {
+        const valuesToInsert: unknown = JSON.parse(rows);
+        if (
+          !Array.isArray(valuesToInsert) ||
+          !valuesToInsert.length ||
+          valuesToInsert.some(
+            (row) =>
+              typeof row !== "object" || row === null || Array.isArray(row),
+          )
+        )
+          throw new Error("Rows must be a nonempty JSON array of objects.");
+        payload = {
+          table: values.get("table"),
+          schema: values.get("schema"),
+          rows: valuesToInsert,
+        };
+      }
+      const output = await api<QueryResult>(
+        `/connections/${connection.id}/${mode}`,
+        json("POST", payload),
+      );
+      if (mode === "query") setResult(output);
+      else
+        setMessage(
+          `${mode === "insert" ? "Insert" : "Command"} completed. ${output.row_count != null && output.row_count >= 0 ? `${output.row_count.toLocaleString()} rows affected.` : "Transaction committed."}`,
+        );
+    } catch (failure) {
+      setError((failure as Error).message);
+    } finally {
+      setBusy(false);
+    }
   }
-  return <Modal title={connection.name} onClose={() => { if (!busy) onClose(); }} wide><div className="console-connection"><Database size={15} />Microsoft SQL Server<span>{String(connection.config.server)} / {String(connection.config.database)}</span></div><form className="modal-form sql-console" onSubmit={execute}><div className="schedule-tabs" role="tablist" aria-label="SQL operation">{(["query", "execute", "insert"] as const).map(value => <button type="button" role="tab" aria-selected={mode === value} key={value} className={mode === value ? "active" : ""} onClick={() => { setMode(value); setError(""); setMessage(""); setResult(null); }}>{value === "query" ? "Read / query" : value === "execute" ? "Execute SQL" : "Insert rows"}</button>)}</div>{mode === "insert" ? <><div className="form-grid"><Field label="Schema"><input name="schema" required defaultValue="dbo" /></Field><Field label="Table"><input name="table" required placeholder="sales" /></Field></div><Field label="Rows (JSON objects)"><textarea className="console-code" rows={8} spellCheck={false} value={rows} onChange={event => setRows(event.target.value)} /></Field></> : <><Field label={mode === "query" ? "SQL query" : "SQL command"}><textarea className="console-code" rows={8} spellCheck={false} required value={sql} onChange={event => setSql(event.target.value)} /></Field><Field label="Parameters (JSON array)" hint='Use ? placeholders in SQL. Example: WHERE region = ? with ["West"].'><textarea className="console-code" rows={2} spellCheck={false} value={parameters} onChange={event => setParameters(event.target.value)} /></Field></>}{mode !== "query" ? <div className="form-note">This operation writes to the connected database. Successful commands commit; failed operations roll back.</div> : null}{error ? <div className="inline-error" role="alert">{error}</div> : null}{message ? <div className="inline-success" role="status"><CheckCircle2 size={14} />{message}</div> : null}<div className="modal-footer"><button className="button" type="button" disabled={busy} onClick={onClose}>Close</button><button className="button primary" disabled={busy}>{busy ? <Spinner /> : <Play size={14} />}{mode === "query" ? "Run query" : mode === "execute" ? "Execute command" : "Insert rows"}</button></div>{result ? <ResultTable result={result} /> : null}</form></Modal>;
+  return (
+    <Modal
+      title={connection.name}
+      onClose={() => {
+        if (!busy) onClose();
+      }}
+      wide
+    >
+      <div className="console-connection">
+        <Database size={15} />
+        Microsoft SQL Server
+        <span>
+          {String(connection.config.server)} /{" "}
+          {String(connection.config.database)}
+        </span>
+      </div>
+      <form className="modal-form sql-console" onSubmit={execute}>
+        <div
+          className="schedule-tabs"
+          role="tablist"
+          aria-label="SQL operation"
+        >
+          {(["query", "execute", "insert"] as const).map((value) => (
+            <button
+              type="button"
+              role="tab"
+              aria-selected={mode === value}
+              key={value}
+              className={mode === value ? "active" : ""}
+              onClick={() => {
+                setMode(value);
+                setError("");
+                setMessage("");
+                setResult(null);
+              }}
+            >
+              {value === "query"
+                ? "Read / query"
+                : value === "execute"
+                  ? "Execute SQL"
+                  : "Insert rows"}
+            </button>
+          ))}
+        </div>
+        {mode === "insert" ? (
+          <>
+            <div className="form-grid">
+              <Field label="Schema">
+                <input name="schema" required defaultValue="dbo" />
+              </Field>
+              <Field label="Table">
+                <input name="table" required placeholder="sales" />
+              </Field>
+            </div>
+            <Field label="Rows (JSON objects)">
+              <textarea
+                className="console-code"
+                rows={8}
+                spellCheck={false}
+                value={rows}
+                onChange={(event) => setRows(event.target.value)}
+              />
+            </Field>
+          </>
+        ) : (
+          <>
+            <Field label={mode === "query" ? "SQL query" : "SQL command"}>
+              <textarea
+                className="console-code"
+                rows={8}
+                spellCheck={false}
+                required
+                value={sql}
+                onChange={(event) => setSql(event.target.value)}
+              />
+            </Field>
+            <Field
+              label="Parameters (JSON array)"
+              hint='Use ? placeholders in SQL. Example: WHERE region = ? with ["West"].'
+            >
+              <textarea
+                className="console-code"
+                rows={2}
+                spellCheck={false}
+                value={parameters}
+                onChange={(event) => setParameters(event.target.value)}
+              />
+            </Field>
+          </>
+        )}
+        {mode !== "query" ? (
+          <div className="form-note">
+            This operation writes to the connected database. Successful commands
+            commit; failed operations roll back.
+          </div>
+        ) : null}
+        {error ? (
+          <div className="inline-error" role="alert">
+            {error}
+          </div>
+        ) : null}
+        {message ? (
+          <div className="inline-success" role="status">
+            <CheckCircle2 size={14} />
+            {message}
+          </div>
+        ) : null}
+        <div className="modal-footer">
+          <button
+            className="button"
+            type="button"
+            disabled={busy}
+            onClick={onClose}
+          >
+            Close
+          </button>
+          <button className="button primary" disabled={busy}>
+            {busy ? <Spinner /> : <Play size={14} />}
+            {mode === "query"
+              ? "Run query"
+              : mode === "execute"
+                ? "Execute command"
+                : "Insert rows"}
+          </button>
+        </div>
+        {result ? <ResultTable result={result} /> : null}
+      </form>
+    </Modal>
+  );
 }
 
-export function ConnectedStorage({ connections, initialConnectionId, onError }: { connections: Connection[]; initialConnectionId?: string | null; onError: (message: string) => void }) {
-  const [connectionId, setConnectionId] = useState(() => connections.some(item => item.id === initialConnectionId) ? initialConnectionId! : connections[0]?.id || "");
+export function ConnectedStorage({
+  connections,
+  initialConnectionId,
+  onError,
+}: {
+  connections: Connection[];
+  initialConnectionId?: string | null;
+  onError: (message: string) => void;
+}) {
+  const [connectionId, setConnectionId] = useState(() =>
+    connections.some((item) => item.id === initialConnectionId)
+      ? initialConnectionId!
+      : connections[0]?.id || "",
+  );
   const [buckets, setBuckets] = useState<BucketPage | null>(null);
   const [bucket, setBucket] = useState("");
   const [prefix, setPrefix] = useState("");
@@ -67,36 +622,652 @@ export function ConnectedStorage({ connections, initialConnectionId, onError }: 
   const [busy, setBusy] = useState(false);
   const [version, setVersion] = useState(0);
   const uploadRef = useRef<HTMLInputElement>(null);
-  const connection = connections.find(item => item.id === connectionId);
-  useEffect(() => { if (!connections.some(item => item.id === connectionId)) setConnectionId(connections[0]?.id || ""); }, [connections, connectionId]);
-  useEffect(() => { setBucket(""); setPrefix(""); setObjects(null); setTokens([null]); setPage(0); }, [connectionId]);
-  useEffect(() => { if (!connectionId) return; let stopped = false; setBusy(true); api<BucketPage>(`/connections/${connectionId}/buckets`).then(result => { if (!stopped) setBuckets(result); }).catch(error => { if (!stopped) onError(error.message); }).finally(() => { if (!stopped) setBusy(false); }); return () => { stopped = true; }; }, [connectionId, version, onError]);
+  const connection = connections.find((item) => item.id === connectionId);
+  useEffect(() => {
+    if (!connections.some((item) => item.id === connectionId))
+      setConnectionId(connections[0]?.id || "");
+  }, [connections, connectionId]);
+  useEffect(() => {
+    setBucket("");
+    setPrefix("");
+    setObjects(null);
+    setTokens([null]);
+    setPage(0);
+  }, [connectionId]);
+  useEffect(() => {
+    if (!connectionId) return;
+    let stopped = false;
+    setBusy(true);
+    api<BucketPage>(`/connections/${connectionId}/buckets`)
+      .then((result) => {
+        if (!stopped) setBuckets(result);
+      })
+      .catch((error) => {
+        if (!stopped) onError(error.message);
+      })
+      .finally(() => {
+        if (!stopped) setBusy(false);
+      });
+    return () => {
+      stopped = true;
+    };
+  }, [connectionId, version, onError]);
   const token = tokens[page];
   useEffect(() => {
     if (!connectionId || !bucket) return;
-    let stopped = false; setBusy(true);
-    const query = new URLSearchParams({ bucket, prefix, limit: "50" }); if (token) query.set("continuation_token", token);
-    api<ObjectPage>(`/connections/${connectionId}/objects?${query}`).then(result => { if (!stopped) setObjects(result); }).catch(error => { if (!stopped) onError(error.message); }).finally(() => { if (!stopped) setBusy(false); });
-    return () => { stopped = true; };
+    let stopped = false;
+    setBusy(true);
+    const query = new URLSearchParams({ bucket, prefix, limit: "50" });
+    if (token) query.set("continuation_token", token);
+    api<ObjectPage>(`/connections/${connectionId}/objects?${query}`)
+      .then((result) => {
+        if (!stopped) setObjects(result);
+      })
+      .catch((error) => {
+        if (!stopped) onError(error.message);
+      })
+      .finally(() => {
+        if (!stopped) setBusy(false);
+      });
+    return () => {
+      stopped = true;
+    };
   }, [connectionId, bucket, prefix, token, version, onError]);
-  function browse(value: string) { setPrefix(value); setObjects(null); setTokens([null]); setPage(0); }
-  async function createBucket() { const name = window.prompt("New bucket name"); if (!name) return; setBusy(true); try { await api(`/connections/${connectionId}/buckets`, json("POST", { name })); setVersion(value => value + 1); } catch (error) { onError((error as Error).message); } finally { setBusy(false); } }
-  async function upload(file: File | undefined) { if (!file) return; const key = window.prompt("Object key", prefix + file.name); if (!key) return; const form = new FormData(); form.append("file", file); form.append("key", key); form.append("bucket", bucket); setBusy(true); try { await api(`/connections/${connectionId}/objects`, { method: "POST", body: form }); setVersion(value => value + 1); } catch (error) { onError((error as Error).message); } finally { setBusy(false); } }
-  async function remove(object: StorageObject) { if (!window.confirm(`Delete object “${object.key}” from ${bucket}? This cannot be undone.`)) return; setBusy(true); try { const query = new URLSearchParams({ bucket, key: object.key }); await api(`/connections/${connectionId}/objects?${query}`, json("DELETE")); setVersion(value => value + 1); } catch (error) { onError((error as Error).message); } finally { setBusy(false); } }
-  if (!connections.length) return <section className="card"><Empty icon={<Cloud size={30} />} title="Connect your object storage">Create an S3 connection in Connections to browse SeaweedFS or a remote object store here.</Empty></section>;
-  return <><section className="card connected-storage"><div className="browser-toolbar"><label className="filter-field">Object store<select aria-label="Object storage connection" value={connectionId} onChange={event => { setConnectionId(event.target.value); setBuckets(null); }}>{connections.map(item => <option value={item.id} key={item.id}>{item.name}</option>)}</select></label><span className="subtle-tag">S3 compatible</span><button className="button" disabled={busy} onClick={() => setVersion(value => value + 1)}><RefreshCw size={14} />Refresh</button>{!bucket ? <button className="button primary" disabled={busy} onClick={() => void createBucket()}><Plus size={14} />Create bucket</button> : <button className="button primary" disabled={busy} onClick={() => uploadRef.current?.click()}><Upload size={14} />Upload file</button>}</div>{bucket ? <><div className="workspace-path"><button onClick={() => { setBucket(""); browse(""); }}><ArrowLeft size={13} />All buckets</button><ChevronRight size={13} /><button onClick={() => browse("")}>{bucket}</button>{prefix ? <><ChevronRight size={13} /><span>{prefix}</span></> : null}</div><form className="prefix-form" onSubmit={event => { event.preventDefault(); const values = new FormData(event.currentTarget); browse(String(values.get("prefix") || "")); }}><label className="list-search"><Search size={14} /><input key={`${bucket}-${prefix}`} name="prefix" aria-label="Object key prefix" defaultValue={prefix} placeholder="Filter by key prefix…" /></label><button className="button" disabled={busy}>Apply prefix</button>{prefix ? <button type="button" className="text-button" onClick={() => browse(prefix.split("/").filter(Boolean).slice(0, -1).join("/") + (prefix.split("/").filter(Boolean).length > 1 ? "/" : ""))}>Up one level</button> : null}</form>{busy && !objects ? <div className="panel-loading"><Spinner />Loading objects…</div> : objects?.items.length || objects?.prefixes.length ? <div className="table-scroll"><table className="data-table"><thead><tr><th>Object key</th><th>Size</th><th>Modified</th><th className="right">Actions</th></tr></thead><tbody>{objects?.prefixes.map(path => <tr key={path}><td><button className="name-link" onClick={() => browse(path)}><ChevronRight size={15} />{path}</button></td><td className="muted">Folder</td><td /><td /></tr>)}{objects?.items.map(object => <tr key={object.key}><td><div className="name-link"><FileCode2 size={16} /><span>{object.key}</span></div></td><td className="muted">{bytes(object.size)}</td><td className="muted">{date(object.modified_at)}</td><td className="right"><div className="row-actions"><a className="icon-button" aria-label={`Download ${object.key}`} href={`/api/connections/${connectionId}/download?${new URLSearchParams({ bucket, key: object.key })}`} download><ArrowDownToLine size={15} /></a><button className="icon-button" disabled={busy} aria-label={`Delete ${object.key}`} onClick={() => void remove(object)}><Trash2 size={14} /></button></div></td></tr>)}</tbody></table></div> : <Empty title="No objects at this prefix" icon={<Cloud size={27} />}>Upload a file or choose a different prefix.</Empty>}<div className="pagination"><span>Page {page + 1} · Up to 50 objects per page</span><div><button className="button" disabled={busy || page === 0} onClick={() => setPage(value => value - 1)}>Previous</button><button className="button" disabled={busy || !objects?.next_token} onClick={() => { setTokens(previous => [...previous.slice(0, page + 1), objects?.next_token || null]); setPage(value => value + 1); }}>Next<ArrowRight size={13} /></button></div></div></> : buckets?.items.length ? <div className="bucket-grid connected-bucket-grid">{buckets.items.map(item => <button className="bucket-card" key={item.name} onClick={() => { setBucket(item.name); browse(""); }}><div><Cloud size={25} /><ArrowRight size={16} /></div><h2>{item.name}</h2><p>{date(item.created_at)}</p></button>)}</div> : busy ? <div className="panel-loading"><Spinner />Loading buckets…</div> : <Empty icon={<Cloud size={28} />} title="This store is ready for data">Create a bucket to organize datasets and pipeline outputs.</Empty>}<div className="bucket-code"><Terminal size={15} /><code>connections.s3({JSON.stringify(connection?.name || "connection-name")})</code><span>Use this saved connection in a notebook</span></div></section><input className="hidden" type="file" ref={uploadRef} aria-label="Upload connected storage object" onChange={event => { void upload(event.target.files?.[0]); event.target.value = ""; }} /></>;
+  function browse(value: string) {
+    setPrefix(value);
+    setObjects(null);
+    setTokens([null]);
+    setPage(0);
+  }
+  async function createBucket() {
+    const name = window.prompt("New bucket name");
+    if (!name) return;
+    setBusy(true);
+    try {
+      await api(`/connections/${connectionId}/buckets`, json("POST", { name }));
+      setVersion((value) => value + 1);
+    } catch (error) {
+      onError((error as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function upload(file: File | undefined) {
+    if (!file) return;
+    const key = window.prompt("Object key", prefix + file.name);
+    if (!key) return;
+    const form = new FormData();
+    form.append("file", file);
+    form.append("key", key);
+    form.append("bucket", bucket);
+    setBusy(true);
+    try {
+      await api(`/connections/${connectionId}/objects`, {
+        method: "POST",
+        body: form,
+      });
+      setVersion((value) => value + 1);
+    } catch (error) {
+      onError((error as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function remove(object: StorageObject) {
+    if (
+      !window.confirm(
+        `Delete object “${object.key}” from ${bucket}? This cannot be undone.`,
+      )
+    )
+      return;
+    setBusy(true);
+    try {
+      const query = new URLSearchParams({ bucket, key: object.key });
+      await api(
+        `/connections/${connectionId}/objects?${query}`,
+        json("DELETE"),
+      );
+      setVersion((value) => value + 1);
+    } catch (error) {
+      onError((error as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+  if (!connections.length)
+    return (
+      <section className="card">
+        <Empty icon={<Cloud size={30} />} title="Connect your object storage">
+          Create an S3 connection in Connections to browse SeaweedFS or a remote
+          object store here.
+        </Empty>
+      </section>
+    );
+  return (
+    <>
+      <section className="card connected-storage">
+        <div className="browser-toolbar">
+          <label className="filter-field">
+            Object store
+            <select
+              aria-label="Object storage connection"
+              value={connectionId}
+              onChange={(event) => {
+                setConnectionId(event.target.value);
+                setBuckets(null);
+              }}
+            >
+              {connections.map((item) => (
+                <option value={item.id} key={item.id}>
+                  {item.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <span className="subtle-tag">S3 compatible</span>
+          <button
+            className="button"
+            disabled={busy}
+            onClick={() => setVersion((value) => value + 1)}
+          >
+            <RefreshCw size={14} />
+            Refresh
+          </button>
+          {!bucket ? (
+            <button
+              className="button primary"
+              disabled={busy}
+              onClick={() => void createBucket()}
+            >
+              <Plus size={14} />
+              Create bucket
+            </button>
+          ) : (
+            <button
+              className="button primary"
+              disabled={busy}
+              onClick={() => uploadRef.current?.click()}
+            >
+              <Upload size={14} />
+              Upload file
+            </button>
+          )}
+        </div>
+        {bucket ? (
+          <>
+            <div className="workspace-path">
+              <button
+                onClick={() => {
+                  setBucket("");
+                  browse("");
+                }}
+              >
+                <ArrowLeft size={13} />
+                All buckets
+              </button>
+              <ChevronRight size={13} />
+              <button onClick={() => browse("")}>{bucket}</button>
+              {prefix ? (
+                <>
+                  <ChevronRight size={13} />
+                  <span>{prefix}</span>
+                </>
+              ) : null}
+            </div>
+            <form
+              className="prefix-form"
+              onSubmit={(event) => {
+                event.preventDefault();
+                const values = new FormData(event.currentTarget);
+                browse(String(values.get("prefix") || ""));
+              }}
+            >
+              <label className="list-search">
+                <Search size={14} />
+                <input
+                  key={`${bucket}-${prefix}`}
+                  name="prefix"
+                  aria-label="Object key prefix"
+                  defaultValue={prefix}
+                  placeholder="Filter by key prefix…"
+                />
+              </label>
+              <button className="button" disabled={busy}>
+                Apply prefix
+              </button>
+              {prefix ? (
+                <button
+                  type="button"
+                  className="text-button"
+                  onClick={() =>
+                    browse(
+                      prefix.split("/").filter(Boolean).slice(0, -1).join("/") +
+                        (prefix.split("/").filter(Boolean).length > 1
+                          ? "/"
+                          : ""),
+                    )
+                  }
+                >
+                  Up one level
+                </button>
+              ) : null}
+            </form>
+            {busy && !objects ? (
+              <div className="panel-loading">
+                <Spinner />
+                Loading objects…
+              </div>
+            ) : objects?.items.length || objects?.prefixes.length ? (
+              <div className="table-scroll">
+                <table className="data-table">
+                  <thead>
+                    <tr>
+                      <th>Object key</th>
+                      <th>Size</th>
+                      <th>Modified</th>
+                      <th className="right">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {objects?.prefixes.map((path) => (
+                      <tr key={path}>
+                        <td>
+                          <button
+                            className="name-link"
+                            onClick={() => browse(path)}
+                          >
+                            <ChevronRight size={15} />
+                            {path}
+                          </button>
+                        </td>
+                        <td className="muted">Folder</td>
+                        <td />
+                        <td />
+                      </tr>
+                    ))}
+                    {objects?.items.map((object) => (
+                      <tr key={object.key}>
+                        <td>
+                          <div className="name-link">
+                            <FileCode2 size={16} />
+                            <span>{object.key}</span>
+                          </div>
+                        </td>
+                        <td className="muted">{bytes(object.size)}</td>
+                        <td className="muted">{date(object.modified_at)}</td>
+                        <td className="right">
+                          <div className="row-actions">
+                            <a
+                              className="icon-button"
+                              aria-label={`Download ${object.key}`}
+                              href={`/api/connections/${connectionId}/download?${new URLSearchParams({ bucket, key: object.key })}`}
+                              download
+                            >
+                              <ArrowDownToLine size={15} />
+                            </a>
+                            <button
+                              className="icon-button"
+                              disabled={busy}
+                              aria-label={`Delete ${object.key}`}
+                              onClick={() => void remove(object)}
+                            >
+                              <Trash2 size={14} />
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ) : (
+              <Empty
+                title="No objects at this prefix"
+                icon={<Cloud size={27} />}
+              >
+                Upload a file or choose a different prefix.
+              </Empty>
+            )}
+            <div className="pagination">
+              <span>Page {page + 1} · Up to 50 objects per page</span>
+              <div>
+                <button
+                  className="button"
+                  disabled={busy || page === 0}
+                  onClick={() => setPage((value) => value - 1)}
+                >
+                  Previous
+                </button>
+                <button
+                  className="button"
+                  disabled={busy || !objects?.next_token}
+                  onClick={() => {
+                    setTokens((previous) => [
+                      ...previous.slice(0, page + 1),
+                      objects?.next_token || null,
+                    ]);
+                    setPage((value) => value + 1);
+                  }}
+                >
+                  Next
+                  <ArrowRight size={13} />
+                </button>
+              </div>
+            </div>
+          </>
+        ) : buckets?.items.length ? (
+          <div className="bucket-grid connected-bucket-grid">
+            {buckets.items.map((item) => (
+              <button
+                className="bucket-card"
+                key={item.name}
+                onClick={() => {
+                  setBucket(item.name);
+                  browse("");
+                }}
+              >
+                <div>
+                  <Cloud size={25} />
+                  <ArrowRight size={16} />
+                </div>
+                <h2>{item.name}</h2>
+                <p>{date(item.created_at)}</p>
+              </button>
+            ))}
+          </div>
+        ) : busy ? (
+          <div className="panel-loading">
+            <Spinner />
+            Loading buckets…
+          </div>
+        ) : (
+          <Empty
+            icon={<Cloud size={28} />}
+            title="This store is ready for data"
+          >
+            Create a bucket to organize datasets and pipeline outputs.
+          </Empty>
+        )}
+        <div className="bucket-code">
+          <Terminal size={15} />
+          <code>
+            connections.s3(
+            {JSON.stringify(connection?.name || "connection-name")})
+          </code>
+          <span>Use this saved connection in a notebook</span>
+        </div>
+      </section>
+      <input
+        className="hidden"
+        type="file"
+        ref={uploadRef}
+        aria-label="Upload connected storage object"
+        onChange={(event) => {
+          void upload(event.target.files?.[0]);
+          event.target.value = "";
+        }}
+      />
+    </>
+  );
 }
 
-export function ConnectionsPanel({ connections, admin, onChanged, onError, onStorage }: { connections: Connection[]; admin: boolean; onChanged: () => void; onError: (message: string) => void; onStorage: (connectionId: string) => void }) {
-  const [editing, setEditing] = useState<Connection | null | undefined>(undefined);
-  const [initialType, setInitialType] = useState<Connection["type"]>("sqlserver");
-  const [consoleConnection, setConsoleConnection] = useState<Connection | null>(null);
+export function ConnectionsPanel({
+  connections,
+  admin,
+  onChanged,
+  onError,
+  onStorage,
+}: {
+  connections: Connection[];
+  admin: boolean;
+  onChanged: () => void;
+  onError: (message: string) => void;
+  onStorage: (connectionId: string) => void;
+}) {
+  const [editing, setEditing] = useState<Connection | null | undefined>(
+    undefined,
+  );
+  const [initialType, setInitialType] =
+    useState<Connection["type"]>("sqlserver");
+  const [consoleConnection, setConsoleConnection] = useState<Connection | null>(
+    null,
+  );
   const [busy, setBusy] = useState<string | null>(null);
   const [tests, setTests] = useState<Record<string, TestResult>>({});
   const [failures, setFailures] = useState<Record<string, string>>({});
   const [filter, setFilter] = useState("");
-  async function test(connection: Connection) { setBusy(connection.id); setFailures(previous => { const next = { ...previous }; delete next[connection.id]; return next; }); try { setTests(previous => { const next = { ...previous }; delete next[connection.id]; return next; }); const result = await api<TestResult>(`/connections/${connection.id}/test`, json("POST")); setTests(previous => ({ ...previous, [connection.id]: result })); } catch (error) { setFailures(previous => ({ ...previous, [connection.id]: (error as Error).message })); } finally { setBusy(null); } }
-  async function remove(connection: Connection) { if (!window.confirm(`Delete saved connection “${connection.name}”? The database or object store will remain intact.`)) return; setBusy(connection.id); try { await api(`/connections/${connection.id}`, json("DELETE")); onChanged(); } catch (error) { onError((error as Error).message); } finally { setBusy(null); } }
-  const visible = connections.filter(connection => !filter || connection.type === filter);
-  return <><SectionHead eyebrow="BRING YOUR DATA TOGETHER" title="Connections" description="Use SQL Server and S3-compatible storage on this machine or another server." actions={admin ? <button className="button primary" onClick={() => { setInitialType("sqlserver"); setEditing(null); }}><Plus size={15} />Create connection</button> : undefined} /><div className="view-tabs" role="tablist" aria-label="Connection type">{[["", "All connections"], ["sqlserver", "Microsoft SQL Server"], ["s3", "Object storage"]].map(([value, label]) => <button role="tab" aria-selected={filter === value} className={filter === value ? "active" : ""} key={value} onClick={() => setFilter(value)}>{label}</button>)}</div><div className="connection-grid">{visible.map(connection => <section className="card connection-card" key={connection.id}><div className="cluster-card-top"><span className={`connection-icon ${connection.type}`}>{connection.type === "sqlserver" ? <Database size={25} /> : <Cloud size={25} />}</span><span className="subtle-tag">{connection.type === "sqlserver" ? "Microsoft SQL Server" : "S3-compatible"}</span></div><h2>{connection.name}</h2><p className="connection-endpoint">{connection.type === "sqlserver" ? `${connection.config.server}:${connection.config.port || 1433} / ${connection.config.database}` : String(connection.config.endpoint_url || "S3 object store")}</p><div className="connection-example"><Terminal size={13} /><code>connections.{connection.type}({JSON.stringify(connection.name)})</code></div>{tests[connection.id] ? <div className="inline-success"><CheckCircle2 size={14} />{tests[connection.id].message || "Connection verified"}</div> : <small className="muted">Saved configuration · Test to verify availability</small>}{failures[connection.id] ? <div className="inline-error" role="alert">{failures[connection.id]}</div> : null}<div className="connection-actions"><button className="button primary soft" onClick={() => connection.type === "sqlserver" ? setConsoleConnection(connection) : onStorage(connection.id)}>{connection.type === "sqlserver" ? <Terminal size={14} /> : <Cloud size={14} />}{connection.type === "sqlserver" ? "SQL console" : "Browse storage"}</button><button className="button" disabled={busy === connection.id} onClick={() => void test(connection)}>{busy === connection.id ? <Spinner /> : <RefreshCw size={13} />}Test</button>{admin && !connection.built_in ? <><button className="icon-button" aria-label={`Edit connection ${connection.name}`} onClick={() => setEditing(connection)}><Pencil size={14} /></button><button className="icon-button" disabled={busy === connection.id} aria-label={`Delete connection ${connection.name}`} onClick={() => void remove(connection)}><Trash2 size={14} /></button></> : null}</div></section>)}</div>{!visible.length ? <section className="card"><Empty icon={<Database size={30} />} title="Your data, connected" action={admin ? <button className="button primary" onClick={() => { setInitialType(filter === "s3" ? "s3" : "sqlserver"); setEditing(null); }}><Plus size={15} />Create connection</button> : undefined}>Add SQL Server for queries and inserts, or S3-compatible storage for shared files.</Empty></section> : null}<div className="info-strip"><ShieldCheck size={17} /><span>Credentials stay on the server and are hidden when you reopen a connection. Every compute target can use the saved connection by name.</span></div>{editing !== undefined ? <ConnectionForm connection={editing} initialType={initialType} onClose={() => setEditing(undefined)} onSaved={() => { if (editing) setTests(previous => { const next = { ...previous }; delete next[editing.id]; return next; }); onChanged(); }} /> : null}{consoleConnection ? <SqlConsole connection={consoleConnection} onClose={() => setConsoleConnection(null)} /> : null}</>;
+  async function test(connection: Connection) {
+    setBusy(connection.id);
+    setFailures((previous) => {
+      const next = { ...previous };
+      delete next[connection.id];
+      return next;
+    });
+    try {
+      setTests((previous) => {
+        const next = { ...previous };
+        delete next[connection.id];
+        return next;
+      });
+      const result = await api<TestResult>(
+        `/connections/${connection.id}/test`,
+        json("POST"),
+      );
+      setTests((previous) => ({ ...previous, [connection.id]: result }));
+    } catch (error) {
+      setFailures((previous) => ({
+        ...previous,
+        [connection.id]: (error as Error).message,
+      }));
+    } finally {
+      setBusy(null);
+    }
+  }
+  async function remove(connection: Connection) {
+    if (
+      !window.confirm(
+        `Delete saved connection “${connection.name}”? The database or object store will remain intact.`,
+      )
+    )
+      return;
+    setBusy(connection.id);
+    try {
+      await api(`/connections/${connection.id}`, json("DELETE"));
+      onChanged();
+    } catch (error) {
+      onError((error as Error).message);
+    } finally {
+      setBusy(null);
+    }
+  }
+  const visible = connections.filter(
+    (connection) => !filter || connection.type === filter,
+  );
+  return (
+    <>
+      <SectionHead
+        eyebrow="BRING YOUR DATA TOGETHER"
+        title="Connections"
+        description="Use SQL Server and S3-compatible storage on this machine or another server."
+        actions={
+          admin ? (
+            <button
+              className="button primary"
+              onClick={() => {
+                setInitialType("sqlserver");
+                setEditing(null);
+              }}
+            >
+              <Plus size={15} />
+              Create connection
+            </button>
+          ) : undefined
+        }
+      />
+      <div className="view-tabs" role="tablist" aria-label="Connection type">
+        {[
+          ["", "All connections"],
+          ["sqlserver", "Microsoft SQL Server"],
+          ["s3", "Object storage"],
+        ].map(([value, label]) => (
+          <button
+            role="tab"
+            aria-selected={filter === value}
+            className={filter === value ? "active" : ""}
+            key={value}
+            onClick={() => setFilter(value)}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+      <div className="connection-grid">
+        {visible.map((connection) => (
+          <section className="card connection-card" key={connection.id}>
+            <div className="cluster-card-top">
+              <span className={`connection-icon ${connection.type}`}>
+                {connection.type === "sqlserver" ? (
+                  <Database size={25} />
+                ) : (
+                  <Cloud size={25} />
+                )}
+              </span>
+              <span className="subtle-tag">
+                {connection.type === "sqlserver"
+                  ? "Microsoft SQL Server"
+                  : "S3-compatible"}
+              </span>
+            </div>
+            <h2>{connection.name}</h2>
+            <p className="connection-endpoint">
+              {connection.type === "sqlserver"
+                ? `${connection.config.server}:${connection.config.port || 1433} / ${connection.config.database}`
+                : String(connection.config.endpoint_url || "S3 object store")}
+            </p>
+            <div className="connection-example">
+              <Terminal size={13} />
+              <code>
+                connections.{connection.type}({JSON.stringify(connection.name)})
+              </code>
+            </div>
+            {tests[connection.id] ? (
+              <div className="inline-success">
+                <CheckCircle2 size={14} />
+                {tests[connection.id].message || "Connection verified"}
+              </div>
+            ) : (
+              <small className="muted">
+                Saved configuration · Test to verify availability
+              </small>
+            )}
+            {failures[connection.id] ? (
+              <div className="inline-error" role="alert">
+                {failures[connection.id]}
+              </div>
+            ) : null}
+            <div className="connection-actions">
+              <button
+                className="button primary soft"
+                onClick={() =>
+                  connection.type === "sqlserver"
+                    ? setConsoleConnection(connection)
+                    : onStorage(connection.id)
+                }
+              >
+                {connection.type === "sqlserver" ? (
+                  <Terminal size={14} />
+                ) : (
+                  <Cloud size={14} />
+                )}
+                {connection.type === "sqlserver"
+                  ? "SQL console"
+                  : "Browse storage"}
+              </button>
+              <button
+                className="button"
+                disabled={busy === connection.id}
+                onClick={() => void test(connection)}
+              >
+                {busy === connection.id ? <Spinner /> : <RefreshCw size={13} />}
+                Test
+              </button>
+              {admin && !connection.built_in ? (
+                <>
+                  <button
+                    className="icon-button"
+                    aria-label={`Edit connection ${connection.name}`}
+                    onClick={() => setEditing(connection)}
+                  >
+                    <Pencil size={14} />
+                  </button>
+                  <button
+                    className="icon-button"
+                    disabled={busy === connection.id}
+                    aria-label={`Delete connection ${connection.name}`}
+                    onClick={() => void remove(connection)}
+                  >
+                    <Trash2 size={14} />
+                  </button>
+                </>
+              ) : null}
+            </div>
+          </section>
+        ))}
+      </div>
+      {!visible.length ? (
+        <section className="card">
+          <Empty
+            icon={<Database size={30} />}
+            title="Your data, connected"
+            action={
+              admin ? (
+                <button
+                  className="button primary"
+                  onClick={() => {
+                    setInitialType(filter === "s3" ? "s3" : "sqlserver");
+                    setEditing(null);
+                  }}
+                >
+                  <Plus size={15} />
+                  Create connection
+                </button>
+              ) : undefined
+            }
+          >
+            Add SQL Server for queries and inserts, or S3-compatible storage for
+            shared files.
+          </Empty>
+        </section>
+      ) : null}
+      <div className="info-strip">
+        <ShieldCheck size={17} />
+        <span>
+          Credentials stay on the server and are hidden when you reopen a
+          connection. Every compute target can use the saved connection by name.
+        </span>
+      </div>
+      {editing !== undefined ? (
+        <ConnectionForm
+          connection={editing}
+          initialType={initialType}
+          onClose={() => setEditing(undefined)}
+          onSaved={() => {
+            if (editing)
+              setTests((previous) => {
+                const next = { ...previous };
+                delete next[editing.id];
+                return next;
+              });
+            onChanged();
+          }}
+        />
+      ) : null}
+      {consoleConnection ? (
+        <SqlConsole
+          connection={consoleConnection}
+          onClose={() => setConsoleConnection(null)}
+        />
+      ) : null}
+    </>
+  );
 }

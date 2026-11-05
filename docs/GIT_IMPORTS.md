@@ -39,7 +39,7 @@ All uppercase names in these examples are placeholders. Self-hosted Git servers 
 
 ## Clone and import in the UI
 
-1. Open the OpenBricks remote UI and sign in.
+1. Open the OpenBricks remote UI, sign in, and select the project that should own the repository and imported notebooks.
 2. Open **Git repositories**, select **Clone repository**, and enter **Display name**, **Repository URL**, and **Branch**. The default branch field is `main`; it must exist in your repository. Your display name becomes the repository's workspace root folder name.
 3. Select **Clone repository**. The card shows the selected branch and checked-out short commit. Files are cloned on the management server into persistent `/data/repositories/<repository-id>`.
 4. On the card, select **Import notebooks**. This is a separate action from cloning. Open **Notebooks** and browse the new repository folder. Subdirectories in Git become nested workspace folders.
@@ -73,7 +73,7 @@ After one successful manual run:
 4. Create the job and use **Run now** to check it. Inspect **Run history**, select the notebook, then select an individual run.
 5. **Advanced** accepts a five-field cron expression. `0 8 * * 1-5` runs Monday–Friday at 08:00 in the selected time zone. Use `UTC` to avoid daylight-saving clock changes, or an IANA zone such as `America/New_York` when local wall-clock time is intended.
 
-The starter's `00_run_pipeline.py` imports shared wheel functions and runs all layers in order. Schedule that notebook alone. OpenBricks jobs currently target one notebook; they do not implement notebook dependency DAGs, `%run`, or `dbutils.notebook.run`. A scheduled run executes the current saved workspace notebook, without automatically pulling Git or rebuilding wheels.
+The starter's `00_run_pipeline.py` imports shared wheel functions and runs all layers in order, so scheduling that notebook remains the simplest first run. OpenBricks also supports multi-notebook dependency workflows: add layer notebooks as steps, connect their dependencies, and use **Add schedule** on the workflow. Put its gold/SQL report steps on the same local metastore, or configure shared storage/catalog access. `%run` and `dbutils.notebook.run` are not supplied. Workspace jobs capture current saved source at each trigger; they do not automatically pull Git or rebuild wheels. See [Workflows](WORKFLOWS.md).
 
 The idle timeout releases the interpreter after 15 minutes without work by default. Saved notebooks, wheel files, blobs, Parquet outputs, and the local metastore remain; Python variables and temporary views disappear. Write a scheduled notebook so it imports dependencies and reads its inputs afresh every time, as the starter does.
 
@@ -108,7 +108,7 @@ display(rows)
 
 Notebooks must be UTF-8, at most 10 MB, and at most 500 cells. Git scanning skips hidden path components, `node_modules`, `__pycache__`, `venv`, and symlinked files; paths escaping the repository are rejected. `.gitignore` alone does not hide an already tracked SQL/notebook file from the importer.
 
-Do not place arbitrary schema-migration `.sql` scripts in a notebook repository unless you want them imported as notebooks. Use one statement per SQL cell; Databricks `%pip`, widgets, `dbutils.secrets`, DBFS mounts, autoloader, and other Databricks-specific services are not implemented by this importer/runtime.
+Do not place arbitrary schema-migration `.sql` scripts in a notebook repository unless you want them imported as notebooks. Use one statement per SQL cell; Databricks `%pip`, `dbutils.secrets`, DBFS mounts, autoloader, and other platform services are not implemented by this importer/runtime. A limited `dbutils.widgets` helper is available; saved typed parameter definitions control UI/job overrides. Read [parameter and widget compatibility](WORKFLOWS.md#define-notebook-inputs) before adapting a Databricks notebook.
 
 ## Pulling updates and protecting workspace edits
 
@@ -132,11 +132,21 @@ Edit locally → commit and push → Pull latest → Import notebooks
 | Same URL cloned as another repository card | Creates a separate checkout and separate workspace copies. |
 | Package code changed | Existing installed wheel is unchanged until **Build & install** is run again. Bump your package version so changes are identifiable. |
 
-Re-importing updates stable IDs; it does not just create fresh copies on every import. Jobs reference those IDs and execute the current saved cells. Keep development copies and scheduled notebooks organized so an import has the intended effect on future runs.
+Re-importing updates stable IDs; it does not just create fresh copies on every import. Workspace jobs reference those IDs and capture the current saved cells at each trigger. Captured runs and immutable releases retain their original sources and wheel manifests when replayed. Keep development copies and scheduled notebooks organized so an import has the intended effect on future runs.
 
-The **Branch** field is passed to `git clone --single-branch --branch`. A branch is the normal update workflow; Git also accepts a tag there and checks it out detached. Use a new clone/card to select another branch or tag: the UI does not switch an existing checkout. An arbitrary commit SHA is not a supported ref selector. A tag checkout generally has no tracking branch for **Pull latest**, so treat it as a fixed snapshot. This follows [Git's clone/ref behavior](https://git-scm.com/docs/git-clone).
+The **Branch** field is passed to `git clone --single-branch --branch`. A branch is the normal update workflow; Git also accepts a tag there and checks it out detached. Use a new clone/card to select another branch or tag: the UI does not switch an existing checkout. An arbitrary commit SHA is not a supported clone-card ref selector. Use **Releases & environments → Create release** to capture notebook Git objects at an exact full commit that already exists in the checkout. A tag checkout generally has no tracking branch for **Pull latest**, so treat it as a fixed snapshot. This follows [Git's clone/ref behavior](https://git-scm.com/docs/git-clone).
 
 OpenBricks does not initialize submodules recursively, provide Git LFS management, resolve merge conflicts, or offer push/pull-request controls. Git hooks and local `file`/`ext` protocols are disabled for these operations.
+
+## Capture a release before changing Git or packages
+
+After importing and validating a project, open **Releases & environments**. Capture the installed wheel set, then create a release from the repository's exact full commit. Choose notebook paths or leave the list empty for supported notebooks at that commit. This reads committed Git objects, rather than browser edits or uncommitted checkout files. The UI accepts a full 40-character hash; the release API also supports full SHA-256 Git hashes.
+
+A release stores notebook sources, their parameter definitions/connection selections, and the selected immutable wheel manifest. **Run release** or a workflow release/path step executes those sources. Release comparison lists added/removed/changed notebooks and environment changes. Pulling Git, importing again, or installing a new wheel does not change an existing release or a captured run.
+
+Runs check wheel content hashes and runtime identity, including the image build. Preserve compatible management/compute images and supply dependency wheels explicitly. Reruns use captured source/inputs/packages but current access and credentials; they do not restore external files, SQL Server contents, or catalog state. See [snapshot and rerun behavior](WORKFLOWS.md#pin-git-sources-and-wheels).
+
+For a small example of typed parameters, safe retries, quality reports, and explicit lineage, use the [workflow starter](../examples/workflow-starter/). Its installer resolves imported notebook IDs into a valid two-step workflow.
 
 ## Private repositories with SSH
 

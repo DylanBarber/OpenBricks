@@ -5,6 +5,7 @@ These examples use small synthetic datasets and the Python/Spark runtime supplie
 | Example | Learn | Requirements |
 | --- | --- | --- |
 | [Hello Spark](hello_spark.py) | Import a source notebook, mix Python/SQL, and save a Spark table | Default OpenBricks compute |
+| [Parameterized workflow](workflow-starter/) | Typed inputs, a two-step DAG, safe retries, quality reports, and lineage | 0.3 runtime; run its installer in a disposable project |
 | [Brickkit](brickkit/) | Build a reusable wheel and import it from a notebook or Spark UDF | Build/upload the wheel first |
 | [Notebook repository starter](notebook-repo/) | Git import, packaged data, nested folders, bronze/silver/gold, quality checks, scheduling | Clone the project, import notebooks, build its wheel |
 

@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import "./globals.css";
 import "./workspace-v2.css";
 import "./brand.css";
+import "./platform.css";
 
 export const metadata: Metadata = {
   title: "OpenBricks · An open home for your data work",
