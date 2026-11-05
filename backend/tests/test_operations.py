@@ -263,6 +263,42 @@ def test_restore_replaces_workspace_and_removes_unbacked_local_files(app, tmp_pa
     assert (destination / "buckets/demo/Orders.CSV").exists()
 
 
+def test_restore_without_initialized_metastore_preserves_its_absence(app, tmp_path):
+    source = seed_source(tmp_path / "source")
+    assert not (source.directory / "metastore").exists()
+    archive = tmp_path / "unused-hive.tar.gz"
+    manifest = build_archive(source, archive)
+    assert not any(name.startswith("metastore/") for name in manifest["files"])
+    app.state.operations.restore(archive, "")
+    assert not (app.state.store.directory / "metastore").exists()
+    assert (app.state.store.directory / "warehouse").is_dir()
+
+
+def test_restore_retains_backed_metastore_files_and_pre_restore_copy(app, tmp_path):
+    source = seed_source(tmp_path / "source")
+    (source.directory / "metastore").mkdir()
+    (source.directory / "metastore/service.properties").write_bytes(
+        b"backed-up database fixture"
+    )
+    destination = app.state.store.directory / "metastore"
+    destination.mkdir()
+    (destination / "service.properties").write_bytes(b"original database fixture")
+    archive = tmp_path / "initialized-hive.tar.gz"
+    build_archive(source, archive)
+    app.state.operations.restore(archive, "")
+    assert (
+        destination / "service.properties"
+    ).read_bytes() == b"backed-up database fixture"
+    previous = list(
+        (app.state.store.directory / "backups").glob(
+            "pre-restore-*/metastore/service.properties"
+        )
+    )
+    assert (
+        len(previous) == 1 and previous[0].read_bytes() == b"original database fixture"
+    )
+
+
 def test_restore_swap_failure_rolls_back_and_requires_restart(
     app, tmp_path, monkeypatch
 ):

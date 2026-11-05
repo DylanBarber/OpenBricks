@@ -47,8 +47,27 @@ jobs:
           build-args: |
             OPENBRICKS_BUILD_ID=${{ github.sha }}
             OPENBRICKS_VERSION=${{ steps.identity.outputs.version }}
-          cache-from: type=gha,scope=${{ matrix.target }}
+          cache-from: |
+            type=gha,scope=compute
+            type=gha,scope=${{ matrix.target }}
           cache-to: type=gha,mode=max,scope=${{ matrix.target }}
+      - name: Export portable Docker image
+        env:
+          IMAGE: ghcr.io/${{ steps.identity.outputs.owner }}/${{ matrix.image }}:${{ steps.identity.outputs.version }}
+          ARCHIVE: openbricks-${{ steps.identity.outputs.version }}-${{ matrix.target }}-linux-amd64.tar.gz
+        run: |
+          docker pull "$IMAGE"
+          docker save "$IMAGE" | gzip -1 > "$ARCHIVE"
+          test "$(stat -c %s "$ARCHIVE")" -lt 2000000000
+          sha256sum "$ARCHIVE" > "$ARCHIVE.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: docker-${{ matrix.target }}
+          path: |
+            openbricks-*.tar.gz
+            openbricks-*.tar.gz.sha256
+          compression-level: 0
+          retention-days: 3
   release:
     needs: images
     runs-on: ubuntu-latest
@@ -56,6 +75,11 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: docker-*
+          merge-multiple: true
+          path: images
       - name: Create release with deployment assets
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -64,4 +88,4 @@ jobs:
           if [[ "$GITHUB_REF_NAME" == *-* ]]; then release_flags+=(--prerelease); fi
           bundle="openbricks-${GITHUB_REF_NAME#v}-deployment.tar.gz"
           tar -czf "$bundle" compose.release.yaml compose.compute.yaml .env.example docker/catalog DEPLOYMENT.md SECURITY.md LICENSE docs
-          gh release create "$GITHUB_REF_NAME" "$bundle" compose.release.yaml compose.compute.yaml .env.example --verify-tag --title "OpenBricks ${GITHUB_REF_NAME#v}" --notes-file "docs/releases/${GITHUB_REF_NAME#v}.md" "${release_flags[@]}"
+          gh release create "$GITHUB_REF_NAME" "$bundle" images/*.tar.gz images/*.sha256 compose.release.yaml compose.compute.yaml .env.example --verify-tag --title "OpenBricks ${GITHUB_REF_NAME#v}" --notes-file "docs/releases/${GITHUB_REF_NAME#v}.md" "${release_flags[@]}"

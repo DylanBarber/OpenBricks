@@ -745,7 +745,10 @@ class Operations:
                         moved.append(name)
                         if source.exists():
                             source.replace(target)
-                        elif name in DATA_DIRS:
+                        elif name in DATA_DIRS and name != "metastore":
+                            # Derby creates its database directory on first
+                            # Hive use and rejects an existing empty directory.
+                            # An uninitialized metastore must remain absent.
                             target.mkdir()
             self._restart_required(
                 "Workspace restored. Restart management and local compute before using the workspace"

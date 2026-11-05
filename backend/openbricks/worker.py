@@ -49,6 +49,23 @@ class CappedOutput(io.StringIO):
         return self.getvalue() + ("\n[Output truncated at 100 KB]" if self.truncated else "")
 
 
+def prepare_metastore_path(data_dir):
+    """Let Derby create its database; old restores may leave an empty folder.
+
+    rmdir is deliberately atomic and nonrecursive. An initialized database,
+    a symlink, or files appearing after the emptiness check are never removed.
+    """
+    metastore = Path(data_dir).resolve() / "metastore"
+    if metastore.is_dir() and not metastore.is_symlink() and not any(metastore.iterdir()):
+        try:
+            metastore.rmdir()
+        except OSError:
+            # A concurrent creator or permission change must leave its files
+            # intact; Derby will report any remaining initialization problem.
+            pass
+    return metastore
+
+
 def spark_session(data_dir: str):
     global _spark
     if _spark is None:
@@ -56,7 +73,7 @@ def spark_session(data_dir: str):
         root = Path(data_dir).resolve()
         warehouse = root / "warehouse"
         warehouse.mkdir(parents=True, exist_ok=True)
-        metastore = root / "metastore"
+        metastore = prepare_metastore_path(root)
         # A single worker owns this local Derby metastore and SparkContext.
         builder = (SparkSession.builder.appName("OpenBricks")
             .master(os.environ.get("SPARK_MASTER", "local[*]"))

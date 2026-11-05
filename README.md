@@ -4,7 +4,7 @@
 
 **An open home for your data work.**
 
-Pre-release: **0.3.0-beta.1**. Build from source with the quickstart below. Versioned images and artifacts are produced by the [release workflow](docs/RELEASING.md); verify the actual release before assuming an image tag is published.
+**Beta: 0.3.0-beta.1.** Build from source with the quickstart below, or use the pinned Docker images and deployment bundle from a [published release](https://github.com/DylanBarber/OpenBricks/releases). See [container installation and releases](docs/RELEASING.md).
 
 A self-hosted notebook workspace for Python, Spark SQL, and scheduled data pipelines. OpenBricks brings notebooks, Git imports, reusable Python packages, object storage, and compute management into one browser UI.
 
@@ -50,9 +50,9 @@ OpenBricks is an independent project inspired by Databricks. It is not affiliate
 
 ## Meet the workspace
 
-![The OpenBricks workspace in dark mode](docs/assets/workspace-dark.png)
+![OpenBricks data workspace: a saved Spark SQL query, results, and chart in dark mode](docs/assets/openbricks-v0.3-data-workspace.jpg)
 
-The screenshot shows the bundled starter's SQL report, executed with synthetic data in a disposable workspace. [See its imported notebook folders](docs/assets/workspace-folders-dark.png).
+The screenshot shows a real Spark SQL result and chart from a disposable workspace. Also see the [starter notebook's SQL report](docs/assets/workspace-dark.png) and [imported notebook folders](docs/assets/workspace-folders-dark.png).
 
 | Capability | What you can do |
 | --- | --- |
