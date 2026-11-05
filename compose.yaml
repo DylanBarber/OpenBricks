@@ -7,6 +7,8 @@ services:
       target: runtime
       args:
         OPENBRICKS_MAX_UPLOAD_MB: ${OPENBRICKS_MAX_UPLOAD_MB:-100}
+        OPENBRICKS_BUILD_ID: ${OPENBRICKS_BUILD_ID:-development}
+        OPENBRICKS_VERSION: ${OPENBRICKS_VERSION:-0.3.0-beta.1}
     ports:
       - "${OPENBRICKS_BIND_ADDRESS:-0.0.0.0}:${OPENBRICKS_PORT:-3000}:3000"
     environment:
@@ -49,6 +51,9 @@ services:
     build:
       context: .
       target: compute
+      args:
+        OPENBRICKS_BUILD_ID: ${OPENBRICKS_BUILD_ID:-development}
+        OPENBRICKS_VERSION: ${OPENBRICKS_VERSION:-0.3.0-beta.1}
     environment:
       DATA_DIR: /data
       OPENBRICKS_COMPUTE_TOKEN: ${OPENBRICKS_COMPUTE_TOKEN:?Set the compute authentication token in .env}

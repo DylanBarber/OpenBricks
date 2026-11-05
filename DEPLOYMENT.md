@@ -124,9 +124,17 @@ See the official [Spark standalone deployment guide](https://spark.apache.org/do
 
 ## Trust, secrets, and backups
 
-OpenBricks is for a trusted team. Notebook code and wheel installation run with the compute service account's permissions. Registered compute services receive notebook source and the saved workspace connection definitions, including credentials; this release does not choose a subset of credentials per notebook. Only register hosts you trust. Use HTTPS for remote services and limit network access to the intended management server and collaborators.
+OpenBricks is for a trusted team. Notebook code and wheel installation run with the compute service account's permissions. Dispatch includes notebook source and only the notebook's explicitly selected connections, constrained by project assignments. An empty selection sends no named connections. Project roles and compute allowlists control application actions; they do not isolate arbitrary Python from shared files, environment settings, or the compute account's underlying privileges. Only register hosts you trust. Use HTTPS for remote services and limit network access to the intended management server and collaborators.
 
 Saved connection credentials and remote compute tokens are encrypted at rest using `/data/secrets.key`, unless `OPENBRICKS_SECRET_KEY` is explicitly provided. Back up the metadata database **together with its key**; restoring one without the other prevents saved credentials from being decrypted. Treat both as sensitive backup material. Include local notebook/object data, wheel artifacts, the Spark warehouse, and separate SeaweedFS/catalog volumes in your backup plan.
+
+The Operations screen can create streamed backups of the management volume, optionally encrypted with a passphrase. It waits for in-flight edits and requires idle compute before snapshotting. Restore validates the archive in staging, replaces local state, and restarts the managed container. External SQL Server databases, remote object storage, separate catalog/SeaweedFS volumes, `.env`, and independently configured compute hosts need their own backups. Keep an externally supplied `OPENBRICKS_SECRET_KEY` separately. See [Operations](docs/OPERATIONS.md) for limits and recovery steps.
+
+## Versioned images and upgrades
+
+The release workflow publishes separate management and compute images. After confirming a release's packages are available, use `docker compose -f compose.release.yaml pull` and `docker compose -f compose.release.yaml up -d` with the same `.env` and project name. Both Compose files use the same named data volume. Never run two management owners against it simultaneously. `compose.yaml` remains the source-build option. Image overrides are `OPENBRICKS_RUNTIME_IMAGE` and `OPENBRICKS_COMPUTE_IMAGE`.
+
+Before an upgrade, back up local data and separate storage/catalog volumes. Stop new submissions and wait for active work to finish. The first start migrates existing records into the shared default project; legacy members retain editor access there. Review assignments before inviting more users. Use matching management/compute versions and retain old images needed by pinned environments. A code rollback alone does not undo metadata changes; use a validated pre-upgrade backup if restoring an older release. See [release process](docs/RELEASING.md).
 
 An image export contains the runtime, not your data volumes. Before moving or replacing a host, back up the relevant volumes separately and restore their ownership so the service account can write them. Avoid `docker compose down -v` unless deleting those persistent volumes is intentional.
 

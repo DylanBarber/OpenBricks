@@ -3,7 +3,7 @@
 name: openbricks-remote-compute
 services:
   compute:
-    image: openbricks-compute:local
+    image: ${OPENBRICKS_COMPUTE_IMAGE:-ghcr.io/dylanbarber/openbricks-compute:0.3.0-beta.1}
     environment:
       DATA_DIR: /data
       OPENBRICKS_COMPUTE_TOKEN: ${OPENBRICKS_COMPUTE_TOKEN:?Set a unique token containing at least 32 characters}

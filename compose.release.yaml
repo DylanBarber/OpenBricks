@@ -1,0 +1,121 @@
+name: openbricks
+services:
+  openbricks:
+    image: ${OPENBRICKS_RUNTIME_IMAGE:-ghcr.io/dylanbarber/openbricks:0.3.0-beta.1}
+    ports:
+      - "${OPENBRICKS_BIND_ADDRESS:-0.0.0.0}:${OPENBRICKS_PORT:-3000}:3000"
+    environment:
+      OPENBRICKS_ADMIN_USERNAME: ${OPENBRICKS_ADMIN_USERNAME:-admin}
+      OPENBRICKS_ADMIN_PASSWORD: ${OPENBRICKS_ADMIN_PASSWORD:?Set a strong initial admin password in .env}
+      OPENBRICKS_SECURE_COOKIE: ${OPENBRICKS_SECURE_COOKIE:-false}
+      OPENBRICKS_COMPUTE_URL: http://compute:8001
+      OPENBRICKS_COMPUTE_TOKEN: ${OPENBRICKS_COMPUTE_TOKEN:?Set the compute authentication token in .env}
+      OPENBRICKS_COMPUTE_SHARED_DATA: "true"
+      OPENBRICKS_CATALOG_URL: ${OPENBRICKS_CATALOG_URL:-}
+      OPENBRICKS_CATALOG_TOKEN: ${OPENBRICKS_CATALOG_TOKEN:-}
+      OPENBRICKS_S3_ENDPOINT: ${OPENBRICKS_S3_ENDPOINT:-}
+      OPENBRICKS_S3_ACCESS_KEY: ${OPENBRICKS_S3_ACCESS_KEY:-}
+      OPENBRICKS_S3_SECRET_KEY: ${OPENBRICKS_S3_SECRET_KEY:-}
+      OPENBRICKS_RUN_TIMEOUT: ${OPENBRICKS_RUN_TIMEOUT:-3600}
+      OPENBRICKS_MAX_UPLOAD_MB: ${OPENBRICKS_MAX_UPLOAD_MB:-100}
+      OPENBRICKS_PUBLIC_URL: ${OPENBRICKS_PUBLIC_URL:-}
+      DATA_DIR: /data
+      TZ: ${TZ:-UTC}
+    volumes:
+      - openbricks-data:/data
+    restart: unless-stopped
+    stop_grace_period: 30s
+    mem_limit: ${OPENBRICKS_CONTROL_MEMORY_LIMIT:-1g}
+    memswap_limit: ${OPENBRICKS_CONTROL_MEMORY_LIMIT:-1g}
+    shm_size: 1gb
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+    depends_on:
+      compute:
+        condition: service_healthy
+
+  compute:
+    image: ${OPENBRICKS_COMPUTE_IMAGE:-ghcr.io/dylanbarber/openbricks-compute:0.3.0-beta.1}
+    environment:
+      DATA_DIR: /data
+      OPENBRICKS_COMPUTE_TOKEN: ${OPENBRICKS_COMPUTE_TOKEN:?Set the compute authentication token in .env}
+      OPENBRICKS_SHARED_DATA: "true"
+      OPENBRICKS_RUN_TIMEOUT: ${OPENBRICKS_RUN_TIMEOUT:-3600}
+      OPENBRICKS_IDLE_TIMEOUT_SECONDS: ${OPENBRICKS_IDLE_TIMEOUT_SECONDS:-900}
+      SPARK_MASTER: ${SPARK_MASTER:-local[2]}
+      SPARK_DRIVER_MEMORY: ${SPARK_DRIVER_MEMORY:-1g}
+      OPENBRICKS_CATALOG_URL: ${OPENBRICKS_CATALOG_URL:-}
+      OPENBRICKS_CATALOG_NAMES: ${OPENBRICKS_CATALOG_NAMES:-unity}
+      OPENBRICKS_CATALOG_TOKEN: ${OPENBRICKS_CATALOG_TOKEN:-}
+      OPENBRICKS_S3_ENDPOINT: ${OPENBRICKS_S3_ENDPOINT:-}
+      OPENBRICKS_S3_REGION: ${OPENBRICKS_S3_REGION:-us-east-1}
+      OPENBRICKS_S3_ACCESS_KEY: ${OPENBRICKS_S3_ACCESS_KEY:-}
+      OPENBRICKS_S3_SECRET_KEY: ${OPENBRICKS_S3_SECRET_KEY:-}
+    volumes:
+      - openbricks-data:/data
+    expose:
+      - "8001"
+    restart: unless-stopped
+    stop_grace_period: 30s
+    mem_limit: ${OPENBRICKS_MEMORY_LIMIT:-4g}
+    memswap_limit: ${OPENBRICKS_MEMORY_LIMIT:-4g}
+    shm_size: 1gb
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+  seaweedfs:
+    image: chrislusf/seaweedfs:4.52
+    profiles: [storage]
+    command: [mini, -dir=/data, -ip.bind=0.0.0.0]
+    environment:
+      AWS_ACCESS_KEY_ID: ${OPENBRICKS_S3_ACCESS_KEY:-}
+      AWS_SECRET_ACCESS_KEY: ${OPENBRICKS_S3_SECRET_KEY:-}
+      S3_BUCKET: openbricks
+    ports:
+      - "${OPENBRICKS_STORAGE_BIND_ADDRESS:-127.0.0.1}:${OPENBRICKS_STORAGE_PORT:-8333}:8333"
+    volumes:
+      - seaweedfs-data:/data
+    restart: unless-stopped
+    mem_limit: 512m
+    memswap_limit: 512m
+    security_opt:
+      - no-new-privileges:true
+
+  catalog:
+    image: unitycatalog/unitycatalog:v0.7.0
+    profiles: [catalog]
+    init: true
+    entrypoint: [/bin/sh, /openbricks/catalog-entrypoint.sh]
+    environment:
+      JAVA_TOOL_OPTIONS: -Xms128m -Xmx512m
+      OPENBRICKS_S3_ACCESS_KEY: ${OPENBRICKS_S3_ACCESS_KEY:-}
+      OPENBRICKS_S3_SECRET_KEY: ${OPENBRICKS_S3_SECRET_KEY:-}
+      OPENBRICKS_S3_REGION: ${OPENBRICKS_S3_REGION:-us-east-1}
+      OPENBRICKS_CATALOG_S3_BUCKETS: ${OPENBRICKS_CATALOG_S3_BUCKETS:-openbricks}
+    volumes:
+      - catalog-data:/home/unitycatalog/etc/db
+      - openbricks-data:/data:ro
+      - ./docker/catalog/server.properties:/openbricks/server.properties:ro
+      - ./docker/catalog/entrypoint.sh:/openbricks/catalog-entrypoint.sh:ro
+      - ./docker/catalog/hibernate.properties:/home/unitycatalog/etc/conf/hibernate.properties:ro
+    expose:
+      - "8080"
+    restart: unless-stopped
+    mem_limit: 1g
+    memswap_limit: 1g
+    security_opt:
+      - no-new-privileges:true
+volumes:
+  openbricks-data:
+  seaweedfs-data:
+  catalog-data:

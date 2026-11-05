@@ -17,7 +17,8 @@ RUN npm run build
 
 FROM python:3.12-slim-bookworm AS backend-base
 LABEL org.opencontainers.image.title="OpenBricks" \
-      org.opencontainers.image.description="Single-host notebooks, Spark SQL, jobs, Git, wheels, and local object storage" \
+      org.opencontainers.image.description="Self-hosted notebooks, workflows, Spark SQL, and data tools" \
+      org.opencontainers.image.source="https://github.com/DylanBarber/OpenBricks" \
       org.opencontainers.image.licenses="Apache-2.0"
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
@@ -49,6 +50,12 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY --chown=10001:10001 backend/ ./
 COPY --chown=10001:10001 docker/ /app/docker/
 COPY --from=spark-jars /opt/jars/ /opt/openbricks/jars/
+ARG OPENBRICKS_BUILD_ID=development
+ARG OPENBRICKS_VERSION=0.3.0-beta.1
+ENV OPENBRICKS_BUILD_ID=${OPENBRICKS_BUILD_ID} \
+    OPENBRICKS_VERSION=${OPENBRICKS_VERSION}
+LABEL org.opencontainers.image.version="${OPENBRICKS_VERSION}" \
+      org.opencontainers.image.revision="${OPENBRICKS_BUILD_ID}"
 USER 10001:10001
 
 FROM backend-base AS compute
@@ -60,6 +67,7 @@ ENTRYPOINT ["/usr/bin/tini", "--"]
 CMD ["python", "-m", "uvicorn", "openbricks.compute:app", "--host", "0.0.0.0", "--port", "8001", "--workers", "1"]
 
 FROM backend-base AS runtime
+ENV OPENBRICKS_MANAGED_CONTAINER=1
 COPY --from=web-build --chown=10001:10001 /build/web/.next/standalone /app/web/
 COPY --from=web-build --chown=10001:10001 /build/web/.next/static /app/web/.next/static/
 VOLUME ["/data"]
