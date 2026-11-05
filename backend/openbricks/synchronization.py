@@ -98,11 +98,24 @@ def metadata(cursor, source):
         )
     identity = hashlib.sha256(json.dumps(list(row), default=str).encode()).hexdigest()
     cursor.execute(
-        "SELECT c.name,COALESCE(ty.name,TYPE_NAME(c.user_type_id)),c.max_length,c.precision,c.scale,c.is_nullable FROM sys.columns c LEFT JOIN sys.types ty ON ty.user_type_id=c.system_type_id AND ty.user_type_id=ty.system_type_id WHERE c.object_id=? ORDER BY c.column_id",
+        "SELECT c.name,COALESCE(ty.name,TYPE_NAME(c.user_type_id)),c.max_length,c.precision,c.scale,c.is_nullable,c.collation_name FROM sys.columns c LEFT JOIN sys.types ty ON ty.user_type_id=c.system_type_id AND ty.user_type_id=ty.system_type_id WHERE c.object_id=? ORDER BY c.column_id",
         (row[1],),
     )
     columns = [
-        dict(zip(("name", "type", "length", "precision", "scale", "nullable"), item))
+        dict(
+            zip(
+                (
+                    "name",
+                    "type",
+                    "length",
+                    "precision",
+                    "scale",
+                    "nullable",
+                    "collation",
+                ),
+                item,
+            )
+        )
         for item in cursor.fetchall()
     ]
     if not columns or any(item["name"].lower() == OP.lower() for item in columns):
@@ -136,6 +149,20 @@ def validate_checkpoint(info, checkpoint, keys):
     if not keys or set(keys) != set(info["keys"]):
         raise ValueError(
             "Change Tracking merge keys must match the source table's primary key"
+        )
+    if any(
+        column["name"] in keys
+        and column["type"].lower()
+        in ("char", "varchar", "nchar", "nvarchar", "sysname")
+        for column in info["columns"]
+    ):
+        # Even BIN2 SQL string equality ignores trailing spaces. CHANGETABLE
+        # can return an earlier spelling of a changed key; a binary Spark
+        # MERGE could then insert a duplicate or miss its eventual deletion.
+        raise ValueError(
+            "Change Tracking text primary keys are unsupported because SQL Server "
+            "collation and trailing-space equality cannot be matched safely by Spark; "
+            "use a non-text source primary key"
         )
     if any(
         column["name"] in keys

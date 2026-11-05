@@ -13,7 +13,12 @@ import pytest
 from fastapi.testclient import TestClient
 
 from openbricks.main import create_app
-from openbricks.synchronization import OP, snapshot_to_parquet
+from openbricks.synchronization import (
+    OP,
+    SourceSchemaChanged,
+    metadata,
+    snapshot_to_parquet,
+)
 from test_sqlserver_live import database
 
 
@@ -88,6 +93,116 @@ def test_real_change_tracking_time_preserves_seventh_digit_and_rejects_lossy_key
     finally:
         connection.close()
     assert list(unsafe_directory.iterdir()) == []
+
+
+def test_real_change_tracking_rejects_text_keys_and_detects_collation_drift_before_staging(
+    database, tmp_path
+):
+    database.execute(
+        "CREATE TABLE dbo.CaseKeyProbe(id nvarchar(40) COLLATE Latin1_General_100_CI_AS PRIMARY KEY,value int); "
+        "CREATE TABLE dbo.SpaceKeyProbe(id varchar(40) COLLATE Latin1_General_100_BIN2 PRIMARY KEY,value int); "
+        "CREATE TABLE dbo.CollationDriftProbe(id int PRIMARY KEY,label nvarchar(40) COLLATE Latin1_General_100_CI_AS NULL); "
+        "ALTER TABLE dbo.CaseKeyProbe ENABLE CHANGE_TRACKING; "
+        "ALTER TABLE dbo.SpaceKeyProbe ENABLE CHANGE_TRACKING; "
+        "ALTER TABLE dbo.CollationDriftProbe ENABLE CHANGE_TRACKING; "
+        "INSERT dbo.CaseKeyProbe VALUES(N'Alpha',1); INSERT dbo.SpaceKeyProbe VALUES('Alpha',1); "
+        "INSERT dbo.CollationDriftProbe VALUES(1,N'Label 雪')"
+    )
+    checkpoint = database.read("SELECT CHANGE_TRACKING_CURRENT_VERSION() AS version")[
+        0
+    ]["version"]
+    database.execute(
+        "UPDATE dbo.CaseKeyProbe SET id=N'alpha',value=2 WHERE id=N'Alpha'; "
+        "UPDATE dbo.SpaceKeyProbe SET id='Alpha ',value=2 WHERE id='Alpha'"
+    )
+    for table, old_bytes, new_bytes in (
+        ("CaseKeyProbe", "41006c00700068006100", "61006c00700068006100"),
+        ("SpaceKeyProbe", "416c706861", "416c70686120"),
+    ):
+        observed = database.read(
+            f"SELECT ct.SYS_CHANGE_OPERATION AS operation,CONVERT(varbinary(80),ct.id) AS ct_key,CONVERT(varbinary(80),s.id) AS stored_key FROM CHANGETABLE(CHANGES dbo.[{table}],?) ct LEFT JOIN dbo.[{table}] s ON s.id=ct.id",
+            [checkpoint],
+        )
+        assert observed == [
+            {"operation": "U", "ct_key": old_bytes, "stored_key": new_bytes}
+        ]
+        directory = tmp_path / table
+        directory.mkdir()
+        connection = database.connect()
+        try:
+            with pytest.raises(ValueError, match="text primary keys are unsupported"):
+                snapshot_to_parquet(
+                    connection,
+                    {"schema": "dbo", "table": table},
+                    ["id"],
+                    None,
+                    directory,
+                )
+        finally:
+            connection.close()
+        assert list(directory.iterdir()) == []
+
+    initial_directory = tmp_path / "collation-initial"
+    initial_directory.mkdir()
+    connection = database.connect()
+    try:
+        initial = snapshot_to_parquet(
+            connection,
+            {"schema": "dbo", "table": "CollationDriftProbe"},
+            ["id"],
+            None,
+            initial_directory,
+        )
+    finally:
+        connection.close()
+    assert initial["rows"] == 1
+    initial_checkpoint = deepcopy(initial["checkpoint"])
+    assert initial["columns"][1]["collation"] == "Latin1_General_100_CI_AS"
+    initial_bytes = {
+        path.name: path.read_bytes() for path in initial_directory.iterdir()
+    }
+    database.execute(
+        "ALTER TABLE dbo.CollationDriftProbe ALTER COLUMN label nvarchar(40) COLLATE Latin1_General_100_CS_AS NULL"
+    )
+    connection = database.connect()
+    cursor = connection.cursor()
+    try:
+        changed = metadata(cursor, {"schema": "dbo", "table": "CollationDriftProbe"})
+    finally:
+        cursor.close()
+        connection.close()
+    assert changed["identity"] == initial["identity"]
+    assert changed["schema_sha256"] != initial["schema_sha256"]
+    assert changed["columns"][1]["collation"] == "Latin1_General_100_CS_AS"
+    assert [
+        {key: value for key, value in column.items() if key != "collation"}
+        for column in changed["columns"]
+    ] == [
+        {key: value for key, value in column.items() if key != "collation"}
+        for column in initial["columns"]
+    ]
+    rejected_directory = tmp_path / "collation-rejected"
+    rejected_directory.mkdir()
+    connection = database.connect()
+    try:
+        with pytest.raises(SourceSchemaChanged, match="Source schema changed"):
+            snapshot_to_parquet(
+                connection,
+                {"schema": "dbo", "table": "CollationDriftProbe"},
+                ["id"],
+                initial_checkpoint,
+                rejected_directory,
+            )
+    finally:
+        connection.close()
+    assert list(rejected_directory.iterdir()) == []
+    assert initial_checkpoint == initial["checkpoint"]
+    assert {
+        path.name: path.read_bytes() for path in initial_directory.iterdir()
+    } == initial_bytes
+    assert database.read("SELECT id,label FROM dbo.CollationDriftProbe") == [
+        {"id": 1, "label": "Label 雪"}
+    ]
 
 
 def test_real_sql_api_json_insert_preserves_decimal_date_unicode_nulls_and_transactions(

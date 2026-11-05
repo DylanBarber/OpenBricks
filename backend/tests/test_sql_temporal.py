@@ -13,7 +13,12 @@ from openbricks.connectors import (
     decode_sqlserver_datetimeoffset,
     decode_sqlserver_time2,
 )
-from openbricks.synchronization import arrow_type, validate_checkpoint
+from openbricks.synchronization import (
+    SourceSchemaChanged,
+    arrow_type,
+    schema_hash,
+    validate_checkpoint,
+)
 
 
 def test_time2_layout_padding_and_all_seven_fractional_digits():
@@ -139,3 +144,69 @@ def test_submicrosecond_timestamp_primary_keys_rejected_before_initial_write(kin
     validate_checkpoint(info, None, ["id"])
     info["columns"].append({"name": "non_key", "type": kind, "scale": 7})
     validate_checkpoint(info, None, ["id"])
+
+
+@pytest.mark.parametrize("kind", ["char", "varchar", "nchar", "nvarchar", "sysname"])
+@pytest.mark.parametrize(
+    "collation", ["SQL_Latin1_General_CP1_CI_AS", "Latin1_General_100_BIN2"]
+)
+def test_text_primary_keys_rejected_regardless_of_collation(kind, collation):
+    info = {
+        "keys": ["tenant", "id"],
+        "columns": [
+            {"name": "tenant", "type": "int"},
+            {"name": "id", "type": kind, "collation": collation},
+        ],
+    }
+    for checkpoint in (None, {"version": 1}):
+        with pytest.raises(ValueError, match="text primary keys are unsupported"):
+            validate_checkpoint(info, checkpoint, ["tenant", "id"])
+
+
+@pytest.mark.parametrize("kind", ["char", "varchar", "nchar", "nvarchar", "sysname"])
+def test_non_key_text_remains_supported(kind):
+    column = {
+        "name": "label",
+        "type": kind,
+        "collation": "SQL_Latin1_General_CP1_CI_AS",
+    }
+    info = {"keys": ["id"], "columns": [{"name": "id", "type": "int"}, column]}
+    validate_checkpoint(info, None, ["id"])
+    assert arrow_type(column) == pa.string()
+
+
+def test_collation_only_change_and_legacy_hash_fail_closed():
+    original = [
+        {"name": "id", "type": "int", "collation": None},
+        {"name": "label", "type": "nvarchar", "collation": "Latin1_General_100_CI_AS"},
+    ]
+    changed = [original[0], {**original[1], "collation": "Latin1_General_100_CS_AS"}]
+    legacy = [
+        {key: value for key, value in column.items() if key != "collation"}
+        for column in original
+    ]
+    info = {
+        "keys": ["id"],
+        "columns": changed,
+        "identity": "source",
+        "minimum": 1,
+        "version": 3,
+        "schema_sha256": schema_hash(changed),
+    }
+    for old_columns in (original, legacy):
+        checkpoint = {
+            "version": 2,
+            "source_identity": "source",
+            "schema_sha256": schema_hash(old_columns),
+        }
+        with pytest.raises(SourceSchemaChanged, match="Source schema changed"):
+            validate_checkpoint(info, checkpoint, ["id"])
+    validate_checkpoint(
+        info,
+        {
+            "version": 2,
+            "source_identity": "source",
+            "schema_sha256": info["schema_sha256"],
+        },
+        ["id"],
+    )

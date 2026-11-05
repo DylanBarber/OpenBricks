@@ -115,6 +115,8 @@ ALTER TABLE dbo.Orders ENABLE CHANGE_TRACKING;
 
 Grant the connector account the required read and `VIEW CHANGE TRACKING` permissions. Merge keys must match the complete source primary key. Use a new Delta sink owned by this ingestion; an unrelated pre-existing table is rejected.
 
+Text primary keys (`char`, `varchar`, `nchar`, `nvarchar`, and `sysname`) are rejected before staging any data. SQL Server collation rules and its treatment of trailing spaces differ from Spark string equality, including with BIN2 collations. Key spelling changes could otherwise create duplicate or undeleted sink rows. Use a supported non-text source primary key for Change Tracking. Text columns outside the primary key remain supported, and ordinary SQL queries and JDBC reads still support text keys.
+
 Native SQL queries return `time` and `datetimeoffset` as ISO strings, preserving SQL Server's seven fractional digits and the original timezone offset. Change Tracking stores `time` as text because Spark does not support the Parquet TIME type. Spark timestamp columns have microsecond precision; `datetimeoffset` values normalize to UTC, and a seventh fractional digit on a non-key timestamp is narrowed to microseconds. Timestamp primary keys with precision greater than six are rejected before writing because distinct SQL keys could otherwise collapse to the same Spark timestamp.
 
 ```json
@@ -133,7 +135,9 @@ Native SQL queries return `time` and `datetimeoffset` as ISO strings, preserving
 
 The first run snapshots the source. Later runs read `CHANGETABLE` and current values inside one snapshot transaction, stream bounded batches through temporary Parquet, and merge inserts/updates/deletes into Delta. Checkpoints advance only after the whole run succeeds. Replaying an interrupted batch is idempotent by primary key. Initial replay can reconcile missing source rows only within the sink owned by this ingestion.
 
-Source identity, column/type/length/nullability, and primary-key changes are checked before writing. An expired checkpoint, source reset, or schema change stops the run. Review the source and create a new ingestion with a new sink for a fresh snapshot; the application does not silently discard a checkpoint or evolve a schema. Unsupported source types fail explicitly. Parallel JDBC partition options are unavailable in this mode because the read uses one snapshot connection. Change Tracking does not preserve every intermediate row version or historical event.
+Source identity, column/type/length/nullability/collation, and primary-key changes are checked before writing. An expired checkpoint, source reset, or schema change stops the run. Review the source and create a new ingestion with a new sink for a fresh snapshot; the application does not silently discard a checkpoint or evolve a schema. Unsupported source types fail explicitly. Parallel JDBC partition options are unavailable in this mode because the read uses one snapshot connection. Change Tracking does not preserve every intermediate row version or historical event.
+
+**Upgrading from the 0.4 beta:** stable 0.4.0 includes collation in the schema fingerprint. Existing beta Change Tracking checkpoints fail closed because they use the older fingerprint. Review the source key requirements, then explicitly create a new ingestion with a new dedicated Delta sink for a fresh snapshot and validate it before switching consumers. Keep the old ingestion paused and its sink available until validation is complete. Do not edit or clear checkpoints manually, or reuse the old sink to bypass validation.
 
 ### Watermark mode
 
