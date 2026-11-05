@@ -4,7 +4,9 @@
 
 **An open home for your data work.**
 
-**Beta: 0.4.0-beta.1.** Build from source with the quickstart below, or use the pinned Docker images and deployment bundle from a [published release](https://github.com/DylanBarber/OpenBricks/releases). See [container installation and releases](docs/RELEASING.md).
+**Stable: 0.4.0.** Build from source with the quickstart below, or use the pinned Docker images and deployment bundle from a [published release](https://github.com/DylanBarber/OpenBricks/releases). See [container installation and releases](docs/RELEASING.md).
+
+The [whole-system test guide](docs/STABLE_TESTING.md) reproduces the release checks with a real disposable SQL Server, separate compute workers, local S3 storage, Unity Catalog, and encrypted recovery onto fresh volumes.
 
 A self-hosted notebook workspace for Python, Spark SQL, and scheduled data pipelines. OpenBricks brings notebooks, Git imports, reusable Python packages, object storage, and compute management into one browser UI.
 

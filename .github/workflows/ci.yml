@@ -85,3 +85,43 @@ jobs:
       - name: Pack the example project without a server
         run: openbricks pack examples/deployable-project/openbricks.yml --output /tmp/openbricks-example.json
       - run: python -m build --wheel cli
+  system:
+    name: Full disposable system smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install ./cli pytest==8.3.5
+      - name: Smoke runner isolation and watcher checks
+        run: python -m pytest -q tests/test_system_smoke_runner.py
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: compute
+          load: true
+          tags: openbricks-compute:system
+          build-args: OPENBRICKS_BUILD_ID=${{ github.sha }}
+          cache-from: type=gha,scope=compute
+          cache-to: type=gha,mode=max,scope=compute-system
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: runtime
+          load: true
+          tags: openbricks:system
+          build-args: OPENBRICKS_BUILD_ID=${{ github.sha }}
+          cache-from: |
+            type=gha,scope=compute-system
+            type=gha,scope=runtime-system
+          cache-to: type=gha,mode=max,scope=runtime-system
+      - name: Real platform, SQL Server, restart and fresh-host recovery proof
+        run: python scripts/run-system-smoke.py --runtime-image openbricks:system --compute-image openbricks-compute:system
+      - name: Ensure disposable resources are removed
+        if: always()
+        run: docker compose --project-name openbricks-smoke --file compose.smoke.yaml --env-file docker/smoke.env.example --profile '*' down --volumes --remove-orphans --timeout 30
+      # Detailed receipts include generated credentials and recovery archives.
+      # They remain private to this job and must never be uploaded as artifacts.

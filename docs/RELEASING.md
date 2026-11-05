@@ -1,10 +1,10 @@
 # Release process
 
-Pull requests and main-branch pushes run a production web build, the backend suite inside the compute image, a separate real SQL Server integration job, and CLI package checks. The backend job enables Java 17 / Spark / Delta checks. All checks must pass before a tag release publishes images.
+Pull requests and main-branch pushes run a production web build, the backend suite inside the compute image, a separate real SQL Server integration job, CLI package checks, and the [disposable whole-system harness](STABLE_TESTING.md). The backend job enables Java 17 / Spark / Delta checks. All checks must pass before a tag release publishes images.
 
 1. Update application/image defaults, deployment examples, changelog, and `docs/releases/<version>.md`. Keep management and compute on the same version/build identity.
-2. Run the checks and exercise the disposable Docker deployment. Test upgrades against a copy of existing metadata. Back up the deployment before upgrading.
-3. Commit the reviewed source, then push an annotated version tag such as `v0.4.0-beta.1`.
+2. Run the checks and the whole-system harness, including remote compute, restart recovery, and a fresh-host encrypted restore. Test upgrades against a copy of existing metadata. Back up the deployment before upgrading.
+3. Commit the reviewed source, then push an annotated version tag such as `v0.4.0`.
 4. The Release workflow runs checks, publishes Linux amd64 images to `ghcr.io/<owner>/openbricks:<version>` and `ghcr.io/<owner>/openbricks-compute:<version>`, and creates a GitHub release with portable Docker image archives/checksums, the installable CLI wheel, and a deployment archive containing documentation, examples, and the optional catalog configuration. Prerelease tags create prereleases. It never updates an unversioned `latest` tag.
 5. Check the Actions result and verify both images can be pulled before announcing availability. New GitHub Container Registry packages may initially be private: set package visibility to public in GitHub package settings for anonymous installation. The workflow has package write permission, not package administration permission.
 
@@ -17,8 +17,8 @@ The tag identifies source; OCI labels identify version and commit. Notebook envi
 The public release also carries `openbricks-<version>-runtime-linux-amd64.tar.gz` and `openbricks-<version>-compute-linux-amd64.tar.gz`, with SHA-256 files. These include the images and their versioned tags, so registry credentials are unnecessary. Verify the checksums, then load both archives:
 
 ```console
-docker load -i openbricks-0.4.0-beta.1-runtime-linux-amd64.tar.gz
-docker load -i openbricks-0.4.0-beta.1-compute-linux-amd64.tar.gz
+docker load -i openbricks-0.4.0-runtime-linux-amd64.tar.gz
+docker load -i openbricks-0.4.0-compute-linux-amd64.tar.gz
 docker compose -f compose.release.yaml up -d --pull never
 ```
 
@@ -27,6 +27,8 @@ For an offline server, transfer the archives and deployment bundle together. The
 Publishing uses GitHub's scoped workflow token. No registry password or private key belongs in the repository. See [GitHub's container publishing guide](https://docs.github.com/en/actions/tutorials/publish-packages/publish-docker-images).
 
 ## Reproduce the SQL Server integration job
+
+Run contributor checks from a full Git checkout; the deployment bundle contains deployment assets rather than the application build sources. For the complete application proof, use [the system harness](STABLE_TESTING.md).
 
 `compose.sql-tests.yaml` starts a disposable SQL Server Developer container and a compute test container on a private Compose network. The Microsoft SQL Server 2025 image is pinned by digest. Tests create a uniquely named database, exercise ODBC inserts/rollback, Spark JDBC reads, and change-tracking snapshot/update/delete/replay behavior, then drop that database. No production data volume or host SQL port is used.
 

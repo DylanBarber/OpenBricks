@@ -348,7 +348,7 @@ def create_app(data_dir=None):
 
     app = FastAPI(
         title="OpenBricks",
-        version="0.4.0-beta.1",
+        version="0.4.0",
         lifespan=lifespan,
         docs_url=None,
         redoc_url=None,

@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.4.0 — 2026-11-05
+
+First stable release of the 0.4 feature set, validated against a disposable SQL Server and the complete containerized application.
+
+- Fix typed SQL Server inserts for precise decimals, Unicode, and nulls; retain transactional batch rollback.
+- Preserve SQL temporal values in native results and support exact SQL `time` text in Delta synchronization; reject timestamp keys beyond Spark precision.
+- Fix concurrent wheel environment publication, overlapping backup/restore maintenance, and interrupted local backup recovery.
+- Add real-server regression tests and a reproducible whole-system test gate covering remote compute, permissions, automation, resource recovery, storage, catalog, notifications, and fresh-host restore.
+- Publish matching stable application, compute, and CLI versions. Default management/compute memory caps remain 1 GB / 4 GB.
+
+See [release notes](docs/releases/0.4.0.md) and [system testing](docs/STABLE_TESTING.md).
+
 ## 0.4.0-beta.1 — 2026-11-05
 
 - Independent notebook/user worker processes, fresh job sessions, memory and concurrency budgets, project priorities, and session controls.

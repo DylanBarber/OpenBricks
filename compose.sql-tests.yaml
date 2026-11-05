@@ -26,7 +26,7 @@ services:
       target: compute
       args:
         OPENBRICKS_BUILD_ID: ${OPENBRICKS_BUILD_ID:-development}
-        OPENBRICKS_VERSION: 0.4.0-beta.1
+        OPENBRICKS_VERSION: 0.4.0
     environment:
       OPENBRICKS_TEST_SQLSERVER: "1"
       OPENBRICKS_SQLSERVER_HOST: sqlserver
@@ -34,7 +34,7 @@ services:
       OPENBRICKS_SQLSERVER_PASSWORD: ${OPENBRICKS_SQLSERVER_PASSWORD:?Set a strong disposable test password}
       SPARK_MASTER: local[1]
       SPARK_DRIVER_MEMORY: 1g
-    command: [python, -m, pytest, -q, -p, "no:cacheprovider", tests/test_sqlserver_live.py]
+    command: [python, -m, pytest, -q, -p, "no:cacheprovider", tests/test_sqlserver_live.py, tests/test_sqlserver_stable.py]
     depends_on:
       sqlserver:
         condition: service_healthy

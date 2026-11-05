@@ -176,6 +176,118 @@ class RecoveryProof:
             },
         )["id"]
 
+    def notebook_run(self, api, name, source):
+        notebook = api.request(
+            "POST",
+            "/notebooks",
+            json={
+                "name": name + " " + self.state["suffix"],
+                "project_id": self.project,
+                "cluster_id": "local",
+                "cells": [{"id": "main", "language": "python", "source": source}],
+            },
+        )
+        started = api.request(
+            "POST",
+            f"/notebooks/{notebook['id']}/run",
+            json={"resource_options": {"mode": "job", "memory_mb": 1536}},
+        )
+        result = self.wait(
+            lambda: api.request("GET", "/runs/" + started["id"]),
+            lambda value: value["status"]
+            in ("succeeded", "failed", "cancelled", "timed_out"),
+            name,
+            timeout=240,
+        )
+        assert result["status"] == "succeeded", "Recovery notebook failed: " + str(
+            result.get("error_class") or result["status"]
+        )
+        return notebook, result
+
+    def prepare_local_execution(self):
+        # These paths belong only to this proof. The fresh host reads them;
+        # it never reruns a source notebook that could repeat prior writes.
+        value = self.recovery.setdefault(
+            "local_execution",
+            {
+                "bucket": "v4-recovery-local-" + self.state["suffix"],
+                "text": "Exact restored local bytes — " + self.state["suffix"] + "\n",
+                "rows": [[42, "restored Delta 雪"], [43, "second exact row"]],
+                "schema": "struct<id:bigint,note:string>",
+            },
+        )
+        value["text_uri"] = "blob://" + value["bucket"] + "/selected/message.txt"
+        value["delta_uri"] = "blob://" + value["bucket"] + "/delta/rows"
+        value["sha256"] = hashlib.sha256(value["text"].encode()).hexdigest()
+        self.source.request(
+            "POST",
+            "/buckets",
+            expected={201, 409},
+            json={"name": value["bucket"], "project_id": self.project},
+        )
+        code = (
+            f"blob.write_text({value['text_uri']!r}, {value['text']!r})\n"
+            f"rows = {value['rows']!r}\n"
+            "frame = spark.createDataFrame(rows, 'id long, note string')\n"
+            f"frame.write.format('delta').mode('overwrite').save(blob.path({value['delta_uri']!r}))\n"
+            f"assert blob.read_text({value['text_uri']!r}) == {value['text']!r}\n"
+            "print('SOURCE_LOCAL_RECOVERY_FIXTURE_COMMITTED')"
+        )
+        notebook, result = self.notebook_run(
+            self.source, "Source recovery data fixture", code
+        )
+        value.update(
+            source_notebook_id=notebook["id"],
+            source_run_id=result["id"],
+            source_code_sha256=hashlib.sha256(code.encode()).hexdigest(),
+        )
+        self.passed(
+            "source local object bytes and a real Delta table commit before the workspace snapshot"
+        )
+
+    def verify_local_execution(self):
+        value = self.recovery.get("local_execution")
+        assert (
+            value
+        ), "Prepare a new recovery archive with the local execution fixture first"
+        restored = self.fresh.request(
+            "GET", "/notebooks/" + value["source_notebook_id"]
+        )
+        assert restored.get("project_id") == self.project
+        assert (
+            hashlib.sha256(restored["cells"][0]["source"].encode()).hexdigest()
+            == value["source_code_sha256"]
+        ), "Restored notebook source differs from the captured source"
+        code = (
+            "import hashlib\n"
+            f"assert hashlib.sha256(blob.read_bytes({value['text_uri']!r})).hexdigest() == {value['sha256']!r}\n"
+            f"frame = spark.read.format('delta').load(blob.path({value['delta_uri']!r}))\n"
+            f"assert frame.schema.simpleString() == {value['schema']!r}\n"
+            f"assert [list(row) for row in frame.orderBy('id').collect()] == {value['rows']!r}\n"
+            "assert spark.sql('SELECT 6 * 7 AS answer').first().answer == 42\n"
+            "print('FRESH_HOST_RESTORED_BLOB_DELTA_SPARK_OK')"
+        )
+        notebook, result = self.notebook_run(
+            self.fresh, "Fresh host restored data execution", code
+        )
+        assert (
+            result.get("cluster_id") == "local"
+            and result["resource_options"]["mode"] == "job"
+        )
+        assert any(
+            "FRESH_HOST_RESTORED_BLOB_DELTA_SPARK_OK" in cell.get("stdout", "")
+            for cell in result.get("outputs", [])
+        ), "Fresh notebook did not confirm restored data reads"
+        value["fresh_execution"] = {
+            "notebook_id": notebook["id"],
+            "run_id": result["id"],
+            "session_id": result.get("session_id"),
+            "passed": True,
+        }
+        self.passed(
+            "a new fresh-host job reads exact restored blob bytes and Delta rows/schema and executes real Spark SQL"
+        )
+
     def prepare(self):
         self.source.login(self.source_password())
         assert self.source.request(
@@ -286,6 +398,7 @@ class RecoveryProof:
         self.passed(
             "source external table has explicit properties, typed ordered columns and selected CSV data"
         )
+        self.prepare_local_execution()
 
         policies = self.source.request(
             "GET", "/operations/backup-policies", params={"project_id": self.project}
@@ -544,10 +657,13 @@ class RecoveryProof:
             )
             == csv
         )
-        self.recovery.update(repeated_apply=repeated, passed=True)
+        self.recovery.update(repeated_apply=repeated)
         self.passed(
             "repeated external recovery safely skips identical objects and existing catalog metadata"
         )
+        self.verify_local_execution()
+        self.recovery["passed"] = True
+        self.save()
 
     def close(self):
         self.save()

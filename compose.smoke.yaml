@@ -1,0 +1,170 @@
+# Isolated, disposable integration services. Never mounts production volumes.
+# Use the environment template and run the phases in docs/STABLE_TESTING.md.
+name: openbricks-smoke
+x-compute-environment: &compute-environment
+  DATA_DIR: /data
+  SPARK_MASTER: local[1]
+  SPARK_DRIVER_MEMORY: 512m
+  OPENBRICKS_CATALOG_URL: http://catalog:8080
+  OPENBRICKS_CATALOG_NAMES: unity
+  OPENBRICKS_S3_ENDPOINT: http://seaweedfs:8333
+  OPENBRICKS_S3_REGION: us-east-1
+  OPENBRICKS_S3_ACCESS_KEY: ${OPENBRICKS_SMOKE_S3_ACCESS_KEY:?Set smoke storage credentials}
+  OPENBRICKS_S3_SECRET_KEY: ${OPENBRICKS_SMOKE_S3_SECRET_KEY:?Set smoke storage credentials}
+services:
+  control:
+    image: ${OPENBRICKS_SMOKE_RUNTIME_IMAGE:-openbricks:local}
+    ports: ["127.0.0.1:3001:3000"]
+    environment:
+      DATA_DIR: /data
+      OPENBRICKS_ADMIN_USERNAME: admin
+      OPENBRICKS_ADMIN_PASSWORD: ${OPENBRICKS_SMOKE_PASSWORD:?Set a disposable smoke administrator password}
+      OPENBRICKS_COMPUTE_URL: http://compute:8001
+      OPENBRICKS_COMPUTE_TOKEN: ${OPENBRICKS_SMOKE_COMPUTE_TOKEN:?Set a disposable compute token}
+      OPENBRICKS_COMPUTE_SHARED_DATA: "true"
+      OPENBRICKS_CATALOG_URL: http://catalog:8080
+    volumes: ["data:/data"]
+    mem_limit: 1g
+    memswap_limit: 1g
+    depends_on:
+      compute: {condition: service_healthy}
+  compute:
+    image: ${OPENBRICKS_SMOKE_COMPUTE_IMAGE:-openbricks-compute:local}
+    environment:
+      <<: *compute-environment
+      OPENBRICKS_COMPUTE_TOKEN: ${OPENBRICKS_SMOKE_COMPUTE_TOKEN:?Set a disposable compute token}
+      OPENBRICKS_SHARED_DATA: "true"
+    volumes: ["data:/data"]
+    mem_limit: 3g
+    memswap_limit: 3g
+  remote:
+    image: ${OPENBRICKS_SMOKE_COMPUTE_IMAGE:-openbricks-compute:local}
+    profiles: [remote]
+    environment:
+      <<: *compute-environment
+      OPENBRICKS_COMPUTE_TOKEN: ${OPENBRICKS_SMOKE_REMOTE_TOKEN:?Set a separate remote token}
+      OPENBRICKS_SHARED_DATA: "false"
+    volumes: ["remote-data:/data"]
+    mem_limit: 2g
+    memswap_limit: 2g
+  sqlserver:
+    image: mcr.microsoft.com/mssql/server:2025-latest@sha256:245f6b1c8903edae52cb20fa31419cefcde1a49938bb8c3447099011fc871ca3
+    profiles: [sql]
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_PID: Developer
+      MSSQL_SA_PASSWORD: ${OPENBRICKS_SQLSERVER_PASSWORD:?Set a disposable SQL Server administrator password}
+      MSSQL_MEMORY_LIMIT_MB: "1536"
+    volumes: ["sql-data:/var/opt/mssql"]
+    mem_limit: 2560m
+    memswap_limit: 2560m
+    healthcheck:
+      test: [CMD-SHELL, 'SQLCMDPASSWORD="$$MSSQL_SA_PASSWORD" /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -C -Q "SELECT 1" -b -l 5 >/dev/null']
+      interval: 5s
+      timeout: 8s
+      start_period: 60s
+      retries: 24
+    stop_grace_period: 30s
+  seaweedfs:
+    image: chrislusf/seaweedfs:4.52
+    command: [mini, -dir=/data, -ip.bind=0.0.0.0]
+    environment:
+      AWS_ACCESS_KEY_ID: ${OPENBRICKS_SMOKE_S3_ACCESS_KEY:?Set smoke storage credentials}
+      AWS_SECRET_ACCESS_KEY: ${OPENBRICKS_SMOKE_S3_SECRET_KEY:?Set smoke storage credentials}
+      S3_BUCKET: stable-data
+    volumes: ["storage:/data"]
+    mem_limit: 256m
+    memswap_limit: 256m
+  catalog:
+    image: unitycatalog/unitycatalog:v0.7.0
+    init: true
+    entrypoint: [/bin/sh, /openbricks/catalog-entrypoint.sh]
+    environment:
+      JAVA_TOOL_OPTIONS: -Xms64m -Xmx256m
+      OPENBRICKS_S3_ACCESS_KEY: ${OPENBRICKS_SMOKE_S3_ACCESS_KEY:?Set smoke storage credentials}
+      OPENBRICKS_S3_SECRET_KEY: ${OPENBRICKS_SMOKE_S3_SECRET_KEY:?Set smoke storage credentials}
+      OPENBRICKS_CATALOG_S3_BUCKETS: stable-data
+    volumes:
+      - catalog:/home/unitycatalog/etc/db
+      - data:/data:ro
+      - ./docker/catalog/server.properties:/openbricks/server.properties:ro
+      - ./docker/catalog/entrypoint.sh:/openbricks/catalog-entrypoint.sh:ro
+      - ./docker/catalog/hibernate.properties:/home/unitycatalog/etc/conf/hibernate.properties:ro
+    mem_limit: 512m
+    memswap_limit: 512m
+  receiver:
+    image: ${OPENBRICKS_SMOKE_COMPUTE_IMAGE:-openbricks-compute:local}
+    command: [python, /smoke/receivers.py]
+    ports: ["127.0.0.1:8025:8025"]
+    volumes: ["./scripts/stable-notification-receiver.py:/smoke/receivers.py:ro"]
+    mem_limit: 64m
+    memswap_limit: 64m
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8025/health', timeout=3)"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+  recovery-control:
+    image: ${OPENBRICKS_SMOKE_RUNTIME_IMAGE:-openbricks:local}
+    profiles: [recovery]
+    ports: ["127.0.0.1:3002:3000"]
+    environment:
+      DATA_DIR: /data
+      OPENBRICKS_ADMIN_USERNAME: recovery
+      OPENBRICKS_ADMIN_PASSWORD: ${OPENBRICKS_RECOVERY_BOOTSTRAP_PASSWORD:?Set a separate recovery bootstrap password}
+      OPENBRICKS_COMPUTE_URL: http://recovery-compute:8001
+      OPENBRICKS_COMPUTE_TOKEN: ${OPENBRICKS_SMOKE_RECOVERY_TOKEN:?Set a separate recovery compute token}
+      OPENBRICKS_COMPUTE_SHARED_DATA: "true"
+      OPENBRICKS_CATALOG_URL: http://recovery-catalog:8080
+    volumes: ["recovery-data:/data"]
+    mem_limit: 1g
+    memswap_limit: 1g
+    depends_on:
+      recovery-compute: {condition: service_healthy}
+  recovery-compute:
+    image: ${OPENBRICKS_SMOKE_COMPUTE_IMAGE:-openbricks-compute:local}
+    profiles: [recovery]
+    environment:
+      DATA_DIR: /data
+      SPARK_MASTER: local[1]
+      SPARK_DRIVER_MEMORY: 512m
+      OPENBRICKS_COMPUTE_TOKEN: ${OPENBRICKS_SMOKE_RECOVERY_TOKEN:?Set a separate recovery compute token}
+      OPENBRICKS_SHARED_DATA: "true"
+    volumes: ["recovery-data:/data"]
+    mem_limit: 2g
+    memswap_limit: 2g
+  recovery-storage:
+    image: chrislusf/seaweedfs:4.52
+    profiles: [recovery]
+    command: [mini, -dir=/data, -ip.bind=0.0.0.0]
+    environment:
+      AWS_ACCESS_KEY_ID: ${OPENBRICKS_SMOKE_S3_ACCESS_KEY:?Set smoke storage credentials}
+      AWS_SECRET_ACCESS_KEY: ${OPENBRICKS_SMOKE_S3_SECRET_KEY:?Set smoke storage credentials}
+      S3_BUCKET: recovery-default
+    volumes: ["recovery-storage:/data"]
+    mem_limit: 256m
+    memswap_limit: 256m
+  recovery-catalog:
+    image: unitycatalog/unitycatalog:v0.7.0
+    profiles: [recovery]
+    init: true
+    entrypoint: [/bin/sh, /openbricks/catalog-entrypoint.sh]
+    environment:
+      JAVA_TOOL_OPTIONS: -Xms64m -Xmx256m
+    volumes:
+      - recovery-catalog:/home/unitycatalog/etc/db
+      - recovery-data:/data:ro
+      - ./docker/catalog/server.properties:/openbricks/server.properties:ro
+      - ./docker/catalog/entrypoint.sh:/openbricks/catalog-entrypoint.sh:ro
+      - ./docker/catalog/hibernate.properties:/home/unitycatalog/etc/conf/hibernate.properties:ro
+    mem_limit: 512m
+    memswap_limit: 512m
+volumes:
+  data:
+  remote-data:
+  sql-data:
+  storage:
+  catalog:
+  recovery-data:
+  recovery-storage:
+  recovery-catalog:

@@ -311,7 +311,7 @@ function Login({ onLogin }: { onLogin: (user: User) => void }) {
         <div className="login-footer">
           <BrickMark small />
           <span>An open home for your data work.</span>
-          <span>v0.4 beta</span>
+          <span>v0.4.0</span>
         </div>
       </div>
     </div>
@@ -2184,7 +2184,7 @@ export function OpenBricks() {
                 OPENBRICKS
               </span>
               <span>An open home for your data work.</span>
-              <span>Open compute platform · v0.4 beta</span>
+              <span>Open compute platform · v0.4.0</span>
             </footer>
           </main>
         )}
