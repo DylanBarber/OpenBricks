@@ -1,5 +1,10 @@
 import type { QualityReport } from "./platform";
-export type User = { id: string; username: string; role: string };
+export type User = {
+  id: string;
+  username: string;
+  role: string;
+  is_service_account?: boolean;
+};
 export type Cell = {
   id: string;
   language: "python" | "sql" | "markdown";
@@ -119,6 +124,9 @@ export type CellOutput = {
   duration_ms?: number;
 };
 export type Run = {
+  session_id?: string;
+  queued_reason?: string;
+  resource_options?: { mode?: string; memory_mb?: number; priority?: number };
   project_id?: string;
   id: string;
   notebook_id: string;
@@ -155,6 +163,15 @@ export type Run = {
   lineage?: unknown[];
 };
 export type Job = {
+  resource_options?: {
+    mode?: "interactive" | "job";
+    memory_mb?: number;
+    priority?: number;
+  };
+  catchup_policy?: "skip" | "latest" | "all";
+  catchup_window_hours?: number;
+  catchup_max_runs?: number;
+  schedule_date_parameter?: string | null;
   project_id?: string;
   workflow_id?: string;
   workflow_name?: string;
@@ -252,6 +269,7 @@ export class ApiError extends Error {
   constructor(
     message: string,
     public status: number,
+    public details?: unknown,
   ) {
     super(message);
   }
@@ -280,12 +298,15 @@ export async function api<T>(path: string, init?: RequestInit): Promise<T> {
     throw new ApiError(
       typeof detail === "string"
         ? detail
-        : Array.isArray(detail)
-          ? detail.map((item: { msg?: string }) => item.msg).join("; ")
-          : response.status >= 500
-            ? "The runtime is unavailable. Check that the OpenBricks server is running."
-            : `Request failed (${response.status}).`,
+        : typeof detail?.message === "string"
+          ? detail.message
+          : Array.isArray(detail)
+            ? detail.map((item: { msg?: string }) => item.msg).join("; ")
+            : response.status >= 500
+              ? "The runtime is unavailable. Check that the OpenBricks server is running."
+              : `Request failed (${response.status}).`,
       response.status,
+      detail,
     );
   }
   if (response.status === 204) return undefined as T;

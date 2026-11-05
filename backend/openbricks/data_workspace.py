@@ -28,6 +28,7 @@ def ingestion_fingerprint(item):
         key: item.get(key)
         for key in ("connection_id", "source", "sink", "keys", "watermark")
     }
+    values["mode"] = item.get("mode", "watermark")
     return hashlib.sha256(json.dumps(values, sort_keys=True).encode()).hexdigest()
 
 
@@ -188,8 +189,14 @@ class ComputeDataWorkspace:
             result = dataframe_result(frame, limit)
         elif operation == "ingest":
             from .ingestion import IncrementalIngestor
+            from .synchronization import ChangeTrackingIngestor
 
-            result = IncrementalIngestor(
+            ingestor = (
+                ChangeTrackingIngestor
+                if payload.get("mode") == "change_tracking"
+                else IncrementalIngestor
+            )
+            result = ingestor(
                 self.spark_factory,
                 self.connections,
                 self.blob,
@@ -207,6 +214,10 @@ class ComputeDataWorkspace:
                 row_count=1,
                 truncated=False,
             )
+        elif engine == "duckdb":
+            from .duckdb_engine import run_duckdb
+
+            result = run_duckdb(spec, self.blob, self.connections)
         elif engine == "sqlserver":
             connection = self.connections.sqlserver(spec["connection_id"])
             schema = spec.get("schema") or "dbo"
@@ -411,6 +422,7 @@ class SavedQueryInput(BaseModel):
     params: list = Field(default_factory=list, max_length=1000)
     connection_id: str | None = None
     cluster_id: str | None = None
+    payload: dict = Field(default_factory=dict)
 
 
 class ExecuteInput(BaseModel):
@@ -438,7 +450,8 @@ class IngestionInput(BaseModel):
     source: dict
     sink: dict
     keys: list[str] = Field(min_length=1, max_length=20)
-    watermark: dict
+    mode: str = "watermark"
+    watermark: dict = Field(default_factory=dict)
     jdbc: dict = Field(default_factory=dict)
     checks: list[dict] = Field(default_factory=list, max_length=100)
 
@@ -483,6 +496,8 @@ def register_data_routes(app, authenticated, access):
         }
 
     def validate_target(body, user, action="run"):
+        if len(json.dumps(getattr(body, "payload", {}) or {})) > 500000:
+            raise ValueError("Operation payload exceeds 500 KB")
         access.require_project(user, body.project_id, action)
         access.require_cluster(
             user,
@@ -490,8 +505,23 @@ def register_data_routes(app, authenticated, access):
             body.project_id,
             action="run" if action == "run" else "read",
         )
-        if body.engine not in ("spark", "sqlserver"):
-            raise ValueError("Engine must be spark or sqlserver")
+        if body.engine not in ("spark", "sqlserver", "duckdb"):
+            raise ValueError("Engine must be spark, sqlserver, or duckdb")
+        if body.engine == "duckdb":
+            sources = (getattr(body, "payload", {}) or {}).get("sources", [])
+            if not isinstance(sources, list) or len(sources) > 32:
+                raise ValueError("Choose at most 32 DuckDB dataset sources")
+            for source in sources:
+                if not isinstance(source, dict):
+                    raise ValueError("DuckDB sources must be objects")
+                if source.get("connection_id"):
+                    record = access.require_connection(
+                        user, source["connection_id"], body.project_id, action
+                    )
+                    if record.get("type") != "s3":
+                        raise ValueError(
+                            "DuckDB remote sources require an S3 connection"
+                        )
         if body.engine == "sqlserver":
             if not body.connection_id:
                 raise ValueError("Choose a SQL Server connection")
@@ -544,6 +574,12 @@ def register_data_routes(app, authenticated, access):
             "project_id": body.project_id,
             "connection_ids": [body.connection_id] if body.connection_id else [],
             "data_execution_id": execution_id,
+            "execution_engine": (
+                "spark"
+                if body.operation in ("ingest", "quality")
+                or body.operation.startswith("delta_")
+                else body.engine
+            ),
             "cells": [
                 {
                     "id": uuid4().hex,
@@ -552,6 +588,14 @@ def register_data_routes(app, authenticated, access):
                 }
             ],
         }
+        if body.engine == "duckdb":
+            notebook["connection_ids"] = sorted(
+                set(
+                    source["connection_id"]
+                    for source in body.payload.get("sources", [])
+                    if source.get("connection_id")
+                )
+            )
         from .connectors import connections_for_runtime
 
         snapshots = connections_for_runtime(
@@ -581,6 +625,7 @@ def register_data_routes(app, authenticated, access):
                 cluster_id=body.cluster_id,
                 connections=snapshots,
                 run_id=run_id,
+                resource_options={"mode": "job", "owner_id": user["id"]},
             )
         except Exception:
             store(request).delete("data_executions", execution_id)
@@ -647,6 +692,7 @@ def register_data_routes(app, authenticated, access):
                         "params",
                         "connection_id",
                         "cluster_id",
+                        "payload",
                     )
                     if key in saved and key not in body.model_fields_set
                 }
@@ -741,11 +787,14 @@ def register_data_routes(app, authenticated, access):
         )
         for key in [
             *body.keys,
-            body.watermark.get("column", ""),
             body.source.get("schema", "dbo"),
             body.source.get("table", ""),
         ]:
             identifier(key)
+        if body.mode not in ("watermark", "change_tracking"):
+            raise ValueError("Choose watermark or change_tracking synchronization")
+        if body.mode == "watermark":
+            identifier(body.watermark.get("column", ""))
         if bool(body.sink.get("table")) == bool(body.sink.get("path")):
             raise ValueError("Choose exactly one sink table or blob path")
         if body.sink.get("table"):
@@ -756,7 +805,7 @@ def register_data_routes(app, authenticated, access):
             raise ValueError("Ingestions cannot move between projects")
         from .ingestion import sql_literal
 
-        if body.watermark.get("type", "number") not in (
+        if body.mode == "watermark" and body.watermark.get("type", "number") not in (
             "number",
             "timestamp",
             "date",
@@ -774,6 +823,10 @@ def register_data_routes(app, authenticated, access):
             "predicates",
         }:
             raise ValueError("Unsupported JDBC option")
+        if body.mode == "change_tracking" and set(body.jdbc) - {"fetch_size"}:
+            raise ValueError(
+                "Change Tracking reads a single snapshot transaction; parallel JDBC options are unavailable"
+            )
         if body.watermark.get("initial") is not None:
             sql_literal(body.watermark["initial"], body.watermark.get("type", "number"))
         with store(request).lock:

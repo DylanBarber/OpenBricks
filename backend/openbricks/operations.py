@@ -139,7 +139,7 @@ def crypt_file(source, destination, passphrase, decrypt=False):
             dst.write(worker.tag)
 
 
-def build_archive(store, destination, include_data=True):
+def build_archive(store, destination, include_data=True, attachments=None):
     root = store.directory
     destination = Path(destination)
     manifest = {
@@ -149,6 +149,7 @@ def build_archive(store, destination, include_data=True):
         "files": {},
         "include_data": include_data,
         "external_secret_key": bool(os.getenv("OPENBRICKS_SECRET_KEY")),
+        "recovery": bool(attachments),
     }
     with tempfile.TemporaryDirectory(
         prefix="openbricks-snapshot-", dir=destination.parent
@@ -160,6 +161,28 @@ def build_archive(store, destination, include_data=True):
                 # Backup binaries live outside the archive. Do not restore
                 # stale absolute download paths or an in-progress self-record.
                 target.execute("DELETE FROM documents WHERE kind='backups'")
+                # A restored snapshot must not replay the backup that captured it.
+                for record_id, raw in target.execute(
+                    "SELECT id, body FROM documents WHERE kind='backup_runs'"
+                ).fetchall():
+                    record = json.loads(raw)
+                    if record.get("status") in {
+                        "pending",
+                        "queued",
+                        "running",
+                        "waiting",
+                        "uploading",
+                        "verifying",
+                    }:
+                        record.update(
+                            status="cancelled",
+                            finished_at=now(),
+                            error="Interrupted by workspace recovery",
+                        )
+                        target.execute(
+                            "UPDATE documents SET body=?, status='cancelled', finished_at=? WHERE kind='backup_runs' AND id=?",
+                            (json.dumps(record), record["finished_at"], record_id),
+                        )
                 target.commit()
         paths = [(snapshot, "openbricks.sqlite3")]
         if (root / "secrets.key").is_file():
@@ -177,6 +200,18 @@ def build_archive(store, destination, include_data=True):
                     path = Path(current) / name
                     if not path.is_symlink() and path.is_file():
                         paths.append((path, path.relative_to(root).as_posix()))
+        if attachments:
+            base = Path(attachments).resolve()
+            for current, folders, files in os.walk(
+                base / "recovery", followlinks=False
+            ):
+                folders[:] = [
+                    name for name in folders if not (Path(current) / name).is_symlink()
+                ]
+                for name in files:
+                    path = Path(current) / name
+                    if path.is_file() and not path.is_symlink():
+                        paths.append((path, path.relative_to(base).as_posix()))
         with tarfile.open(destination, "w:gz") as archive:
             if len(paths) + 1 > 100_000:
                 raise ValueError("Workspace has too many files for this backup format")
@@ -236,6 +271,7 @@ def extract_archive(source, staging, passphrase=""):
                     *DATA_DIRS,
                     "openbricks.sqlite3",
                     "secrets.key",
+                    "recovery",
                 ):
                     raise ValueError("Backup contains an unsupported root path")
                 if member.name == "manifest.json" and member.size > 20 * 1024**2:
@@ -291,7 +327,7 @@ def extract_archive(source, staging, passphrase=""):
                 raise ValueError("Backup documents must be an ordinary table")
             db.execute("SELECT kind,id,body FROM documents LIMIT 1")
             protected = db.execute(
-                "SELECT json_extract(body,'$._secrets'),json_extract(body,'$._token') FROM documents WHERE kind IN ('connections','clusters','notification_targets')"
+                "SELECT json_extract(body,'$._secrets'),json_extract(body,'$._token'),json_extract(body,'$._passphrase'),json_extract(body,'$._github_token') FROM documents WHERE kind IN ('connections','clusters','notification_targets','backup_policies','repositories')"
             )
             box = None
             for row in protected:
@@ -438,6 +474,9 @@ class Operations:
     @contextmanager
     def _workspace_guard(self, include_workflows=True):
         with ExitStack() as stack:
+            automation = getattr(self.app.state, "automation", None)
+            if automation:
+                stack.enter_context(automation.maintenance())
             workflows = getattr(self.app.state, "workflows", None)
             if include_workflows:
                 stack.enter_context(getattr(workflows, "lock", nullcontext()))
@@ -576,6 +615,9 @@ class Operations:
         try:
             policy = self.policy()
             preview = retention_preview(self.store, policy)
+            automation = getattr(self.app.state, "automation", None)
+            if automation:
+                automation.cleanup(preview["_run_cutoff"])
             with self.store.connect() as db:
                 for id in preview["_output_ids"]:
                     db.execute(
@@ -594,7 +636,9 @@ class Operations:
                     (expired,),
                 )
             for backup in self.store.list("backups")[policy["backup_keep"] :]:
-                if backup.get("status") == "succeeded":
+                if backup.get("status") == "succeeded" and not backup.get(
+                    "_offsite_uploading"
+                ):
                     path = Path(backup["_path"])
                     if not path.is_symlink() and path.resolve().is_relative_to(
                         (self.store.directory / "backups").resolve()
@@ -620,7 +664,7 @@ class Operations:
                     409, "Wait for queued and running work before backup or restore"
                 )
 
-    def backup(self, body):
+    def backup(self, body, exporter=None):
         if body.passphrase and len(body.passphrase) < 12:
             raise ValueError("Use a backup passphrase of at least 12 characters")
         self.require_idle()
@@ -651,6 +695,7 @@ class Operations:
             root = self.store.directory / "backups"
             temporary = root / f".{id}.tar.gz"
             final = root / (id + (".obbackup" if body.passphrase else ".tar.gz"))
+            attachments = root / (".attachments-" + id)
             try:
                 self.begin_maintenance("Creating a consistent workspace backup")
                 self.app.state.scheduler.pause()
@@ -660,7 +705,21 @@ class Operations:
                         # Close the local Spark/Derby writer before copying its
                         # files. Remote servers' data is outside this backup.
                         self.app.state.runtime.reset()
-                    build_archive(self.store, temporary, body.include_data)
+                    if exporter:
+                        attachments.mkdir()
+                        item["recovery"] = exporter(attachments)
+                        item["includes"].append("selected_integrations")
+                        item["excludes"] = [
+                            "external_sql",
+                            "unselected_external_data",
+                            "server_environment",
+                        ]
+                    build_archive(
+                        self.store,
+                        temporary,
+                        body.include_data,
+                        attachments if exporter else None,
+                    )
                 if body.passphrase:
                     crypt_file(temporary, final, body.passphrase)
                 else:
@@ -681,6 +740,7 @@ class Operations:
             finally:
                 try:
                     temporary.unlink(missing_ok=True)
+                    shutil.rmtree(attachments, ignore_errors=True)
                     self.store.put("backups", item)
                 finally:
                     try:
@@ -708,6 +768,9 @@ class Operations:
                 "Restoring the workspace; the management service must restart"
             )
             self.app.state.scheduler.pause()
+            backup_manager = getattr(self.app.state, "backup_automation", None)
+            if backup_manager:
+                backup_manager.pause(wait=True)
             with self._workspace_guard(include_workflows=False):
                 self.require_idle()
                 # From this point onward the app must restart on either success
@@ -719,11 +782,15 @@ class Operations:
                 self.app.state.runtime.close()
                 if hasattr(self.app.state, "notifications"):
                     self.app.state.notifications.close()
+                if backup_manager:
+                    backup_manager.close()
                 rollback.mkdir()
                 directories = (
                     DATA_DIRS if manifest.get("include_data") else ("notebooks",)
                 )
                 names = ["openbricks.sqlite3", "secrets.key", *directories]
+                if manifest.get("recovery") or (root / "recovery").exists():
+                    names.append("recovery")
                 with self.store.lock:
                     # Every Store connection is closed before the lock is
                     # released. Checkpoint before moving the main database;
@@ -783,6 +850,9 @@ class Operations:
             else:
                 self.app.state.maintenance = None
                 self.app.state.scheduler.resume()
+                backup_manager = getattr(self.app.state, "backup_automation", None)
+                if backup_manager:
+                    backup_manager.resume()
             raise
         finally:
             shutil.rmtree(staging, ignore_errors=True)

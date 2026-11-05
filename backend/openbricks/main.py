@@ -20,9 +20,11 @@ from pathlib import Path
 from urllib.parse import urlparse
 from uuid import uuid4
 from zoneinfo import ZoneInfo
+from typing import Literal
 
 import psutil
 from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.events import EVENT_JOB_SUBMITTED
 from apscheduler.triggers.cron import CronTrigger
 from fastapi import (
     Depends,
@@ -96,6 +98,7 @@ class RunInput(BaseModel):
     parameters: dict = Field(default_factory=dict, max_length=64)
     environment_id: str | None = None
     timeout_seconds: int | None = Field(default=None, ge=1, le=86400)
+    resource_options: dict | None = None
 
 
 class BasicSchedule(BaseModel):
@@ -117,12 +120,19 @@ class JobInput(BaseModel):
     environment_id: str | None = None
     notification_ids: list[str] = Field(default_factory=list, max_length=20)
     timeout_seconds: int = Field(default=3600, ge=1, le=86400)
+    resource_options: dict | None = None
     cron: str = Field(default="0 9 * * *", max_length=100)
     timezone: str = "UTC"
     enabled: bool = True
     schedule_mode: str = "advanced"
     basic_schedule: BasicSchedule | None = None
     cluster_id: str | None = Field(default=None, max_length=80)
+    catchup_policy: Literal["skip", "latest", "all"] = "skip"
+    catchup_window_hours: int = Field(default=24, ge=1, le=168)
+    catchup_max_runs: int = Field(default=24, ge=1, le=366)
+    schedule_date_parameter: str | None = Field(
+        default=None, max_length=100, pattern=r"^[A-Za-z_][A-Za-z0-9_]*$"
+    )
 
 
 class RepositoryInput(BaseModel):
@@ -130,6 +140,11 @@ class RepositoryInput(BaseModel):
     url: str = Field(min_length=1, max_length=2000)
     branch: str = Field(default="main", min_length=1, max_length=200)
     project_id: str = DEFAULT_PROJECT
+
+
+class RepositoryImportInput(BaseModel):
+    overwrite: bool = False
+    expected_versions: dict[str, int] | None = Field(default=None, max_length=1000)
 
 
 class BuildInput(BaseModel):
@@ -281,13 +296,27 @@ def create_app(data_dir=None):
                 "misfire_grace_time": 60,
             },
         )
+        from .automation import AutomationManager
+
+        app.state.automation = AutomationManager(app)
+        from .backup_automation import BackupAutomation
+
+        app.state.backup_automation = BackupAutomation(app)
         app.state.started = time.monotonic()
         app.state.login_attempts = defaultdict(deque)
         app.state.runtime.start()
         app.state.workflows.start()
+        if os.getenv("OPENBRICKS_RECOVERY_DRILL") != "1":
+
+            def scheduled_submission(event):
+                for occurrence in event.scheduled_run_times:
+                    app.state.automation.record_scheduled_fire(event.job_id, occurrence)
+
+            app.state.scheduler.add_listener(scheduled_submission, EVENT_JOB_SUBMITTED)
         app.state.scheduler.start()
         app.state.operations.start()
-        app.state.notifications.start()
+        if os.getenv("OPENBRICKS_RECOVERY_DRILL") != "1":
+            app.state.notifications.start()
         for job in store.list("jobs"):
             if not job.get("run_as_user_id"):
                 administrator = next(
@@ -303,9 +332,14 @@ def create_app(data_dir=None):
                     job.setdefault("project_id", DEFAULT_PROJECT)
                     store.put("jobs", job)
             schedule(app, job)
+        if os.getenv("OPENBRICKS_RECOVERY_DRILL") != "1":
+            app.state.automation.start()
+            app.state.backup_automation.start()
         try:
             yield
         finally:
+            app.state.backup_automation.close()
+            app.state.automation.close()
             app.state.operations.close()
             app.state.notifications.close()
             app.state.scheduler.shutdown(wait=False)
@@ -314,7 +348,7 @@ def create_app(data_dir=None):
 
     app = FastAPI(
         title="OpenBricks",
-        version="0.3.0",
+        version="0.4.0-beta.1",
         lifespan=lifespan,
         docs_url=None,
         redoc_url=None,
@@ -394,6 +428,11 @@ def create_app(data_dir=None):
         return JSONResponse({"detail": str(exc)}, status_code=409)
 
     def authenticated(request: Request):
+        from .automation_auth import authenticate_bearer
+
+        principal = authenticate_bearer(request)
+        if principal is not None:
+            return principal
         token = request.cookies.get(COOKIE)
         if not token:
             raise HTTPException(401, "Sign in to continue")
@@ -500,7 +539,7 @@ def create_app(data_dir=None):
                 + "00" * 32
             ),
         )
-        if not user or not valid:
+        if not user or not valid or user.get("is_service_account"):
             raise HTTPException(401, "Incorrect username or password")
         attempts.clear()
         token = secrets.token_urlsafe(48)
@@ -1004,6 +1043,10 @@ def create_app(data_dir=None):
                 user, connection_id, notebook.get("project_id") or DEFAULT_PROJECT
             )
         extra = {"cluster_id": target} if target else {}
+        extra["resource_options"] = {
+            **((body.resource_options or {}) if body else {}),
+            "owner_id": user["id"],
+        }
         if body and body.parameters:
             extra["parameters"] = body.parameters
         environment_id = (
@@ -1093,6 +1136,7 @@ def create_app(data_dir=None):
             "created_at": now(),
             "last_run_at": None,
         }
+        request.app.state.automation.validate_job(job, user)
         request.app.state.store.put("jobs", job)
         schedule(request.app, job)
         return job_view(request.app, job)
@@ -1118,6 +1162,7 @@ def create_app(data_dir=None):
             notebook_name=notebook["name"],
             run_as_user_id=job.get("run_as_user_id") or user["id"],
         )
+        request.app.state.automation.validate_job(job, user)
         request.app.state.store.put("jobs", job)
         schedule(request.app, job)
         return job_view(request.app, job)
@@ -1207,11 +1252,24 @@ def create_app(data_dir=None):
         return request.app.state.store.put("repositories", repo)
 
     @app.post("/api/repositories/{id}/import")
-    def import_repository(id: str, request: Request, user=Depends(authenticated)):
+    def import_repository(
+        id: str,
+        request: Request,
+        body: RepositoryImportInput | None = None,
+        user=Depends(authenticated),
+    ):
         with request.app.state.store.lock:
             repo = lookup(request, "repositories", id)
             store = request.app.state.store
             base = store.directory / "repositories" / id
+            from .git_workspace import check_import_conflicts, source_fingerprint
+
+            check_import_conflicts(
+                store,
+                repo,
+                overwrite=bool(body and body.overwrite),
+                expected_versions=body.expected_versions if body else None,
+            )
             project_id = repo.get("project_id") or DEFAULT_PROJECT
             with store.connect() as db:
                 previous_rows = db.execute(
@@ -1251,6 +1309,16 @@ def create_app(data_dir=None):
                 )
                 notebook.update(
                     id=previous["id"] if previous else uuid4().hex,
+                    name=(
+                        previous.get("name", notebook["name"])
+                        if previous
+                        else notebook["name"]
+                    ),
+                    description=(
+                        previous.get("description", "")
+                        if previous
+                        else notebook.get("description", "")
+                    ),
                     created_at=previous["created_at"] if previous else now(),
                     updated_at=now(),
                     repository_id=id,
@@ -1272,6 +1340,7 @@ def create_app(data_dir=None):
                     version=previous.get("version", 1) + 1 if previous else 1,
                     imported_commit=repo.get("commit_full") or repo.get("commit"),
                 )
+                notebook["_git_source_sha256"] = source_fingerprint(notebook)
                 store.put("notebooks", notebook)
                 save_notebook_file(store, notebook)
                 record_revision(store, notebook, "Git import", user["id"])
@@ -1453,6 +1522,25 @@ def create_app(data_dir=None):
     register_data_routes(app, authenticated, access)
     register_operation_routes(app, authenticated, admin)
     register_notification_routes(app, authenticated, admin)
+    from .automation_auth import register_automation_auth_routes
+
+    register_automation_auth_routes(app, authenticated, admin, access)
+    from .resources import register_resource_routes
+
+    register_resource_routes(app, authenticated, admin, access)
+    from .git_workspace import register_git_routes
+    from .deployments import register_deployment_routes
+
+    register_git_routes(app, authenticated, admin, access)
+    register_deployment_routes(
+        app, authenticated, access, lambda job: schedule(app, job), save_notebook_file
+    )
+    from .automation import register_automation_routes
+
+    register_automation_routes(app, authenticated, access)
+    from .backup_automation import register_backup_automation_routes
+
+    register_backup_automation_routes(app, authenticated, admin, access)
     return app
 
 
@@ -1662,12 +1750,16 @@ def job_view(app, job):
 
 def schedule(app, job):
     scheduler = app.state.scheduler
+    if hasattr(app.state, "automation"):
+        app.state.automation.track_job(job)
     if scheduler.get_job(job["id"]):
         scheduler.remove_job(job["id"])
     if not job["enabled"]:
         return
 
     def execute():
+        if hasattr(app.state, "automation"):
+            return app.state.automation.dispatch_schedule(job["id"])
         store = app.state.store
         current = store.get("jobs", job["id"])
         if current and current["enabled"]:
@@ -1768,6 +1860,8 @@ def validate_git_url(url):
         or not parsed.hostname
         or not parsed.path
         or parsed.password
+        or parsed.query
+        or parsed.fragment
         or (parsed.scheme == "https" and parsed.username)
     ):
         raise ValueError(

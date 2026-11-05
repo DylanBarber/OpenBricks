@@ -56,6 +56,32 @@ Restore uploads are bounded by `OPENBRICKS_MAX_UPLOAD_MB`, default `100`. The UI
 
 External data/catalog state and remote compute data are unchanged by restore. Recheck account access, named connections, schedules, package manifests, and external data consistency before running restored pipelines. A local workspace backup is not a transactionally coordinated backup of all those systems.
 
+## Scheduled encrypted off-host backups
+
+Administrators use **Backup & recovery** to create project-scoped policies. Select an assigned S3-compatible connection, an existing destination bucket, a prefix outside any exported source prefix, and a Basic/cron schedule with timezone. Supply a unique passphrase of at least 12 characters; blank secret fields on an edit keep the previous value. Keep the passphrase and any external `OPENBRICKS_SECRET_KEY` outside the server. Losing them can make recovery impossible.
+
+The durable queue records a schedule occurrence before advancing its cursor. Missed backup times coalesce into one current snapshot. Busy workspaces wait for an idle maintenance window, and transfers use bounded sequential multipart uploads. Archive SHA-256 and size are recorded in remote metadata and a receipt. **Verify restore** downloads and boots an isolated copy with jobs, event observers, notifications, credentials for UI login, and backup scheduling disabled. It validates archive contents, decryption, management startup, login, and workspace reads; it does not execute pipelines or certify external service availability.
+
+Select same-project notification destinations to receive backup success/failure reports. Remote retention only deletes verified archives recorded as belonging to this installation and policy. It does not sweep arbitrary bucket prefixes. Failed restore drills retain their diagnostic status in paged backup history.
+
+### Selected storage and catalog exports
+
+Policies can include selected S3 bucket prefixes and Unity Catalog metadata. Object copies verify source ETags and before/after inventories. Catalog export contains catalogs, schemas, table definitions, and columns; it is not a copy of the catalog service database or table data unless the corresponding files were selected for export. Quiesce external writers for a consistent cross-system recovery point. There is no distributed transaction covering independent storage/catalog services.
+
+Exports are bounded to 10,000 objects/20 GiB and 20,000 table definitions. Local workspace archive limits still apply. The encrypted archive contains the selected exports under `recovery/`. Do not include the backup destination within an exported source prefix, including through another connection to the same endpoint.
+
+Recovery destinations must support atomic `If-None-Match` conditional writes for single and multipart S3 uploads. Unsupported providers fail safely. Recovery rehashes an existing object before treating it as identical. Catalog replay supports external tables; managed tables and views are rejected at preview. Table/column properties, comments, partition positions, and decimal metadata are retained; ownership, grants, and service-generated IDs are not replayed.
+
+### Recover from another host
+
+1. Start a compatible OpenBricks deployment and log in as its administrator.
+2. Add and assign the S3 connection containing the archive to the recovery project.
+3. Choose **Restore from S3**, enter the bucket/key and passphrase, and review the replacement warning. The server downloads directly into bounded staging, so this path does not use the browser's 100 MB upload allowance.
+4. Restart management and bundled compute, then sign in to the restored workspace. Preserve `.env`, external keys, and any prior recovery directory until verification finishes.
+5. For selected external exports, choose **Recovery plan**, map source connection IDs to the intended current destinations, inspect the object/table counts, then apply that exact plan hash. Existing different objects are rejected; matching previously restored objects can be skipped to resume an interrupted recovery. Existing catalog resources are preserved. This is an additive recovery operation, not a destructive mirror.
+
+Remote archive downloads are capped at 20 GiB and available staging space. Recovered schedules and access settings belong to the restored workspace: review them before normal execution. Remote compute volumes, external databases, unselected prefixes, service accounts outside OpenBricks, server configuration, and Docker images remain separate recovery responsibilities.
+
 ## Configure notifications
 
 Under **Operations → Notifications**, create an email (SMTP) or webhook target for the current project. Set the events—failed, slow, and/or successful runs—and enable delivery. Slow-run alerts default to 300 seconds; the configurable threshold is 30–86,400 seconds while a run is still running.

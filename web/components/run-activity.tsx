@@ -10,6 +10,20 @@ export function RunActivity({ run }: { run: Run }) {
     total = run.progress?.total_cells || 0;
   return (
     <section className="run-activity">
+      {run.status === "queued" && run.queued_reason ? (
+        <p className="form-note">{run.queued_reason}</p>
+      ) : null}
+      {run.resource_options ? (
+        <p className="form-note">
+          {run.resource_options.mode === "interactive"
+            ? "Interactive worker"
+            : "Fresh job worker"}
+          {run.resource_options.memory_mb
+            ? ` · ${run.resource_options.memory_mb.toLocaleString()} MB budget`
+            : ""}
+          {run.session_id ? ` · Session ${run.session_id.slice(0, 10)}` : ""}
+        </p>
+      ) : null}
       {run.cancel_requested ? (
         <p className="form-note">
           Cancellation requested. Waiting for the compute target to confirm that

@@ -1,4 +1,5 @@
 """Durable notebook DAGs using the existing bounded compute execution queues."""
+
 from __future__ import annotations
 
 import copy
@@ -35,6 +36,7 @@ class TaskInput(BaseModel):
     max_retries: int = Field(default=0, ge=0, le=5)
     retry_delay_seconds: int = Field(default=30, ge=1, le=86400)
     retry_safe: bool = False
+    resource_options: dict = Field(default_factory=dict)
 
 
 class WorkflowInput(BaseModel):
@@ -73,7 +75,9 @@ class WorkflowManager:
         self.store, self.runtime, self.access = store, runtime, access
         self.lock = threading.RLock()
         self.stopped = threading.Event()
-        self.thread = threading.Thread(target=self._loop, daemon=True, name="openbricks-workflows")
+        self.thread = threading.Thread(
+            target=self._loop, daemon=True, name="openbricks-workflows"
+        )
         self.on_terminal = None
 
     def start(self):
@@ -97,60 +101,98 @@ class WorkflowManager:
 
     def _source(self, task, project_id, user):
         if bool(task.get("notebook_id")) == bool(task.get("release_id")):
-            raise ValueError("Each task needs either notebook_id or release_id and path")
+            raise ValueError(
+                "Each task needs either notebook_id or release_id and path"
+            )
         if task.get("release_id"):
             release = self.store.get("releases", task["release_id"])
             if not release or release.get("project_id") != project_id:
                 raise ValueError("Task release was not found in this project")
-            found = next((item["notebook"] for item in release["notebooks"] if item["path"] == task.get("path")), None)
+            found = next(
+                (
+                    item["notebook"]
+                    for item in release["notebooks"]
+                    if item["path"] == task.get("path")
+                ),
+                None,
+            )
             if not found:
                 raise ValueError("Task notebook path was not found in its release")
             notebook = copy.deepcopy(found)
             environment = release["_environment"]
-            provenance = {"release_id": release["id"], "repository_id": release["repository_id"], "commit": release["commit"], "path": task["path"], "source_sha256": release["source_sha256"]}
+            provenance = {
+                "release_id": release["id"],
+                "repository_id": release["repository_id"],
+                "commit": release["commit"],
+                "path": task["path"],
+                "source_sha256": release["source_sha256"],
+            }
         else:
             notebook = self.store.get("notebooks", task["notebook_id"])
             if not notebook or notebook.get("project_id", "default") != project_id:
                 raise ValueError("Task notebook was not found in this project")
             environment = None
-            provenance = {"notebook_id": notebook["id"], "source_sha256": hashlib.sha256(json.dumps(notebook["cells"], sort_keys=True).encode()).hexdigest()}
+            provenance = {
+                "notebook_id": notebook["id"],
+                "source_sha256": hashlib.sha256(
+                    json.dumps(notebook["cells"], sort_keys=True).encode()
+                ).hexdigest(),
+            }
         if task.get("connection_ids") is not None:
             notebook["connection_ids"] = task["connection_ids"]
         if self.access is not None:
             self.access.require_notebook(user, notebook, "run")
             if hasattr(self.access, "require_cluster"):
-                self.access.require_cluster(user, task.get("cluster_id") or notebook.get("cluster_id"), project_id, "run")
+                self.access.require_cluster(
+                    user,
+                    task.get("cluster_id") or notebook.get("cluster_id"),
+                    project_id,
+                    "run",
+                )
             for identifier in notebook.get("connection_ids", []):
                 self.access.require_connection(user, identifier, project_id, "run")
         if task.get("environment_id"):
-            environment = get_environment(self.store, task["environment_id"], project_id)
+            environment = get_environment(
+                self.store, task["environment_id"], project_id
+            )
         return notebook, environment, provenance
 
     def validate(self, value, user=None):
         value = WorkflowInput.model_validate(value).model_dump()
         project_id = value["project_id"]
         self._authorize(user, project_id, "edit")
-        value["parameter_definitions"] = normalize_definitions(value["parameter_definitions"])
+        value["parameter_definitions"] = normalize_definitions(
+            value["parameter_definitions"]
+        )
         # Saving a required input without a default is valid; it is requested
         # when the workflow starts rather than invented at definition time.
-        partial = [{**item, "required": False} for item in value["parameter_definitions"]]
+        partial = [
+            {**item, "required": False} for item in value["parameter_definitions"]
+        ]
         resolve_parameters(partial, value["parameters"])
         for identifier in value["notification_ids"]:
             target = self.store.get("notification_targets", identifier)
             if not target or target.get("project_id", "default") != project_id:
-                raise ValueError("Notification destination was not found in this project")
+                raise ValueError(
+                    "Notification destination was not found in this project"
+                )
         tasks = {task["key"]: task for task in value["tasks"]}
         if len(tasks) != len(value["tasks"]):
             raise ValueError("Workflow task keys must be unique")
         for key, task in tasks.items():
             if key in task["depends_on"] or set(task["depends_on"]) - tasks.keys():
-                raise ValueError("Task dependencies must reference other workflow tasks")
+                raise ValueError(
+                    "Task dependencies must reference other workflow tasks"
+                )
             if len(set(task["depends_on"])) != len(task["depends_on"]):
                 raise ValueError("Task dependencies must be unique")
             if task["max_retries"] and not task["retry_safe"]:
-                raise ValueError("Retries require retry_safe=true for a task with idempotent writes")
+                raise ValueError(
+                    "Retries require retry_safe=true for a task with idempotent writes"
+                )
             self._source(task, project_id, user)
         visited, visiting = set(), set()
+
         def visit(key):
             if key in visiting:
                 raise ValueError("Workflow dependencies contain a cycle")
@@ -161,19 +203,26 @@ class WorkflowManager:
                 visit(parent)
             visiting.remove(key)
             visited.add(key)
+
         for key in tasks:
             visit(key)
         return value
 
-    def submit(self, workflow, parameters=None, user=None, trigger="manual", job_id=None, default_cluster_id=None):
+    def capture(self, workflow, parameters=None, user=None, default_cluster_id=None):
         with self.lock:
             if self.stopped.is_set():
-                raise RuntimeBusy("Workflow coordination is stopping; try again after maintenance")
+                raise RuntimeBusy(
+                    "Workflow coordination is stopping; try again after maintenance"
+                )
             project_id = workflow.get("project_id", "default")
             self._authorize(user, project_id, "run")
             # Validation also checks graph and source access, while a run-only
             # account need not have permission to edit its saved definition.
-            values = resolve_parameters(workflow.get("parameter_definitions", []), parameters, workflow.get("parameters", {}))
+            values = resolve_parameters(
+                workflow.get("parameter_definitions", []),
+                parameters,
+                workflow.get("parameters", {}),
+            )
             specs = {}
             captured = None
             for original in workflow["tasks"]:
@@ -185,38 +234,217 @@ class WorkflowManager:
                     if captured is None:
                         captured = capture_environment(self.store, project_id)
                     environment = captured
-                inherited = {item["name"]: values[item["name"]] for item in notebook.get("parameter_definitions", []) if item["name"] in values}
-                task_parameters = resolve_parameters(notebook.get("parameter_definitions", []), substitute(task.get("parameters", {}), values), inherited)
-                specs[task["key"]] = {"task": copy.deepcopy(task), "notebook": notebook, "environment": environment,
-                    "parameters": task_parameters, "provenance": provenance}
+                inherited = {
+                    item["name"]: values[item["name"]]
+                    for item in notebook.get("parameter_definitions", [])
+                    if item["name"] in values
+                }
+                task_parameters = resolve_parameters(
+                    notebook.get("parameter_definitions", []),
+                    substitute(task.get("parameters", {}), values),
+                    inherited,
+                )
+                specs[task["key"]] = {
+                    "task": copy.deepcopy(task),
+                    "notebook": notebook,
+                    "environment": environment,
+                    "parameters": task_parameters,
+                    "provenance": provenance,
+                }
             if len(json.dumps(specs, allow_nan=False)) > 20_000_000:
                 raise ValueError("Captured workflow source exceeds 20 MB")
-            return self._new_run(workflow, values, specs, user, trigger, job_id)
+            # This contains source and immutable artifact identities, never the
+            # decrypted credentials that are refreshed at task admission.
+            return {
+                "workflow": copy.deepcopy(workflow),
+                "parameters": values,
+                "specs": specs,
+            }
 
-    def _new_run(self, workflow, parameters, specs, user, trigger, job_id=None, previous=None, preserve=None):
+    def submit_captured(
+        self,
+        captured,
+        parameters=None,
+        user=None,
+        trigger="manual",
+        job_id=None,
+        run_id=None,
+    ):
+        with self.lock:
+            workflow = captured["workflow"]
+            self._authorize(user, workflow.get("project_id", "default"), "run")
+            values = resolve_parameters(
+                workflow.get("parameter_definitions", []),
+                (
+                    parameters
+                    if parameters is not None
+                    else captured.get("parameters", {})
+                ),
+                workflow.get("parameters", {}),
+            )
+            specs = copy.deepcopy(captured["specs"])
+            for spec in specs.values():
+                notebook = spec["notebook"]
+                inherited = {
+                    item["name"]: values[item["name"]]
+                    for item in notebook.get("parameter_definitions", [])
+                    if item["name"] in values
+                }
+                spec["parameters"] = resolve_parameters(
+                    notebook.get("parameter_definitions", []),
+                    substitute(spec["task"].get("parameters", {}), values),
+                    inherited,
+                )
+            return self._new_run(
+                workflow, values, specs, user, trigger, job_id, run_id=run_id
+            )
+
+    def capture_job(self, job, user):
+        project_id = job.get("project_id", "default")
+        if bool(job.get("notebook_id")) == bool(job.get("workflow_id")):
+            raise ValueError("Choose exactly one notebook or workflow")
+        if job.get("workflow_id"):
+            workflow = self.store.get("workflows", job["workflow_id"])
+        else:
+            notebook = self.store.get("notebooks", job["notebook_id"])
+            workflow = (
+                None
+                if not notebook
+                else {
+                    "id": "notebook:" + notebook["id"],
+                    "name": notebook["name"],
+                    "project_id": notebook.get("project_id", "default"),
+                    "parameter_definitions": notebook.get("parameter_definitions", []),
+                    "parameters": {},
+                    "tasks": [
+                        {
+                            "key": "notebook",
+                            "notebook_id": notebook["id"],
+                            "cluster_id": job.get("cluster_id")
+                            or notebook.get("cluster_id"),
+                            "environment_id": job.get("environment_id"),
+                            "timeout_seconds": job.get("timeout_seconds", 3600),
+                            "resource_options": job.get("resource_options") or {},
+                        }
+                    ],
+                }
+            )
+        if not workflow or workflow.get("project_id", "default") != project_id:
+            raise ValueError(
+                "Automation target no longer belongs to its configured project"
+            )
+        return self.capture(
+            workflow, job.get("parameters", {}), user, job.get("cluster_id")
+        )
+
+    def submit(
+        self,
+        workflow,
+        parameters=None,
+        user=None,
+        trigger="manual",
+        job_id=None,
+        default_cluster_id=None,
+    ):
+        with self.lock:
+            captured = self.capture(workflow, parameters, user, default_cluster_id)
+            return self.submit_captured(
+                captured, user=user, trigger=trigger, job_id=job_id
+            )
+
+    def _new_run(
+        self,
+        workflow,
+        parameters,
+        specs,
+        user,
+        trigger,
+        job_id=None,
+        previous=None,
+        preserve=None,
+        run_id=None,
+    ):
         if self.stopped.is_set():
-            raise RuntimeBusy("Workflow coordination is stopping; try again after maintenance")
+            raise RuntimeBusy(
+                "Workflow coordination is stopping; try again after maintenance"
+            )
+        if run_id:
+            existing = self.store.get("workflow_runs", run_id)
+            if existing:
+                if (
+                    existing.get("project_id", "default")
+                    != workflow.get("project_id", "default")
+                    or existing.get("parameters") != parameters
+                ):
+                    raise ValueError(
+                        "Automation admission identifier is already in use"
+                    )
+                return existing
         with self.store.connect() as db:
-            active = db.execute("SELECT COUNT(*) FROM documents WHERE kind='workflow_runs' AND status IN ('queued','running')").fetchone()[0]
+            active = db.execute(
+                "SELECT COUNT(*) FROM documents WHERE kind='workflow_runs' AND status IN ('queued','running')"
+            ).fetchone()[0]
         if active >= 100:
             raise RuntimeBusy("Workflow queue is full")
         tasks = []
         for key, spec in specs.items():
-            old = next((task for task in (previous or {}).get("tasks", []) if task["key"] == key), None)
-            tasks.append(copy.deepcopy(old) if old and key in (preserve or set()) else {"key": key, "status": "pending", "depends_on": spec["task"].get("depends_on", []), "run_id": None, "attempts": [], "error": None})
-        value = {"id": uuid4().hex, "workflow_id": workflow["id"], "job_id": job_id, "name": workflow["name"],
-            "project_id": workflow.get("project_id", "default"), "status": "queued", "trigger": trigger, "parameters": parameters,
-            "created_at": now(), "started_at": None, "finished_at": None, "error": None, "tasks": tasks,
-            "progress": {"completed": sum(task["status"] in TERMINAL for task in tasks), "total": len(tasks)},
-            "_specs": copy.deepcopy(specs), "_actor": {key: user[key] for key in ("id", "username", "role") if user and key in user},
-            "repair_of": previous["id"] if previous else None}
+            old = next(
+                (
+                    task
+                    for task in (previous or {}).get("tasks", [])
+                    if task["key"] == key
+                ),
+                None,
+            )
+            tasks.append(
+                copy.deepcopy(old)
+                if old and key in (preserve or set())
+                else {
+                    "key": key,
+                    "status": "pending",
+                    "depends_on": spec["task"].get("depends_on", []),
+                    "run_id": None,
+                    "attempts": [],
+                    "error": None,
+                }
+            )
+        value = {
+            "id": run_id or uuid4().hex,
+            "workflow_id": workflow["id"],
+            "job_id": job_id,
+            "name": workflow["name"],
+            "project_id": workflow.get("project_id", "default"),
+            "status": "queued",
+            "trigger": trigger,
+            "parameters": parameters,
+            "created_at": now(),
+            "started_at": None,
+            "finished_at": None,
+            "error": None,
+            "tasks": tasks,
+            "progress": {
+                "completed": sum(task["status"] in TERMINAL for task in tasks),
+                "total": len(tasks),
+            },
+            "_specs": copy.deepcopy(specs),
+            "_actor": {
+                key: user[key]
+                for key in ("id", "username", "role")
+                if user and key in user
+            },
+            "repair_of": previous["id"] if previous else None,
+        }
         if self.stopped.is_set():
-            raise RuntimeBusy("Workflow coordination is stopping; try again after maintenance")
+            raise RuntimeBusy(
+                "Workflow coordination is stopping; try again after maintenance"
+            )
         return self.store.put("workflow_runs", value)
 
     def submit_job(self, job, parameters=None, user=None, trigger="manual"):
         if self.stopped.is_set():
-            raise RuntimeBusy("Workflow coordination is stopping; try again after maintenance")
+            raise RuntimeBusy(
+                "Workflow coordination is stopping; try again after maintenance"
+            )
         if user is None and job.get("run_as_user_id"):
             user = self.store.get("users", job["run_as_user_id"])
         values = {**job.get("parameters", {}), **(parameters or {})}
@@ -224,19 +452,55 @@ class WorkflowManager:
             workflow = self.store.get("workflows", job["workflow_id"])
             if not workflow:
                 raise ValueError("Scheduled workflow no longer exists")
-            return self.submit(workflow, values, user, trigger, job["id"], default_cluster_id=job.get("cluster_id"))
+            if workflow.get("project_id", "default") != job.get(
+                "project_id", "default"
+            ):
+                raise ValueError(
+                    "Scheduled workflow no longer belongs to its configured project"
+                )
+            return self.submit(
+                workflow,
+                values,
+                user,
+                trigger,
+                job["id"],
+                default_cluster_id=job.get("cluster_id"),
+            )
         notebook = self.store.get("notebooks", job.get("notebook_id", ""))
         if not notebook:
             raise ValueError("Scheduled notebook no longer exists")
+        if notebook.get("project_id", "default") != job.get("project_id", "default"):
+            raise ValueError(
+                "Scheduled notebook no longer belongs to its configured project"
+            )
         self._authorize(user, notebook.get("project_id", "default"), "run")
         if self.access is not None:
             self.access.require_notebook(user, notebook, "run")
             if hasattr(self.access, "require_cluster"):
-                self.access.require_cluster(user, job.get("cluster_id") or notebook.get("cluster_id"), notebook.get("project_id", "default"), "run")
+                self.access.require_cluster(
+                    user,
+                    job.get("cluster_id") or notebook.get("cluster_id"),
+                    notebook.get("project_id", "default"),
+                    "run",
+                )
             for identifier in notebook.get("connection_ids", []):
-                self.access.require_connection(user, identifier, notebook.get("project_id", "default"), "run")
-        return self.runtime.submit(notebook, trigger=trigger, job_id=job["id"], cluster_id=job.get("cluster_id") or notebook.get("cluster_id"), parameters=values,
-            timeout_seconds=job.get("timeout_seconds"), environment_id=job.get("environment_id"))
+                self.access.require_connection(
+                    user, identifier, notebook.get("project_id", "default"), "run"
+                )
+        return self.runtime.submit(
+            notebook,
+            trigger=trigger,
+            job_id=job["id"],
+            cluster_id=job.get("cluster_id") or notebook.get("cluster_id"),
+            parameters=values,
+            timeout_seconds=job.get("timeout_seconds"),
+            environment_id=job.get("environment_id"),
+            resource_options={
+                **(job.get("resource_options") or {}),
+                "mode": "job",
+                "owner_id": user.get("id") if user else None,
+            },
+        )
 
     def _actor(self, run):
         actor = run.get("_actor", {})
@@ -254,17 +518,55 @@ class WorkflowManager:
         if self.access is not None:
             self.access.require_notebook(actor, spec["notebook"], "run")
             if hasattr(self.access, "require_cluster"):
-                self.access.require_cluster(actor, spec["task"].get("cluster_id") or spec["notebook"].get("cluster_id"), run["project_id"], "run")
+                self.access.require_cluster(
+                    actor,
+                    spec["task"].get("cluster_id")
+                    or spec["notebook"].get("cluster_id"),
+                    run["project_id"],
+                    "run",
+                )
             for identifier in spec["notebook"].get("connection_ids", []):
-                self.access.require_connection(actor, identifier, run["project_id"], "run")
+                self.access.require_connection(
+                    actor, identifier, run["project_id"], "run"
+                )
         if not task.get("run_id"):
             task["run_id"] = uuid4().hex
-            task["attempts"].append({"number": len(task["attempts"]) + 1, "run_id": task["run_id"], "status": "queued", "created_at": now()})
+            task["attempts"].append(
+                {
+                    "number": len(task["attempts"]) + 1,
+                    "run_id": task["run_id"],
+                    "status": "queued",
+                    "created_at": now(),
+                }
+            )
         task["status"] = "queued"
         self.store.put("workflow_runs", run)  # Persist admission ID before RPC.
-        return self.runtime.submit(spec["notebook"], trigger="workflow", job_id=run.get("job_id"), cluster_id=spec["task"].get("cluster_id"),
-            parameters=spec["parameters"], timeout_seconds=spec["task"].get("timeout_seconds", 3600), environment=spec["environment"],
-            provenance={**spec["provenance"], "workflow_run_id": run["id"], "task_key": task["key"], "attempt": len(task["attempts"])}, run_id=task["run_id"])
+        options = {
+            **(spec["task"].get("resource_options") or {}),
+            "mode": "job",
+            "owner_id": actor.get("id"),
+        }
+        return self.runtime.submit(
+            spec["notebook"],
+            trigger=(
+                run["trigger"]
+                if run.get("workflow_id", "").startswith("notebook:")
+                else "workflow"
+            ),
+            job_id=run.get("job_id"),
+            cluster_id=spec["task"].get("cluster_id"),
+            parameters=spec["parameters"],
+            timeout_seconds=spec["task"].get("timeout_seconds", 3600),
+            environment=spec["environment"],
+            provenance={
+                **spec["provenance"],
+                "workflow_run_id": run["id"],
+                "task_key": task["key"],
+                "attempt": len(task["attempts"]),
+            },
+            run_id=task["run_id"],
+            resource_options=options,
+        )
 
     def _tick(self, run):
         dirty = False
@@ -275,25 +577,39 @@ class WorkflowManager:
         for task in run["tasks"]:
             if task["status"] in TERMINAL:
                 continue
-            child = self.store.get("runs", task["run_id"]) if task.get("run_id") else None
+            child = (
+                self.store.get("runs", task["run_id"]) if task.get("run_id") else None
+            )
             if run.get("_cancel_requested"):
                 if child and child["status"] not in TERMINAL:
                     try:
                         child = self.runtime.cancel(child["id"])
                     except (ValueError, RuntimeBusy):
-                        if run.get("error") != "Cancellation is pending acknowledgment from compute":
-                            run["error"] = "Cancellation is pending acknowledgment from compute"
+                        if (
+                            run.get("error")
+                            != "Cancellation is pending acknowledgment from compute"
+                        ):
+                            run["error"] = (
+                                "Cancellation is pending acknowledgment from compute"
+                            )
                             dirty = True
                         continue
                 task.update(status="cancelled", error="Workflow cancelled")
                 if task["attempts"]:
-                    task["attempts"][-1].update(status=child["status"] if child else "cancelled", finished_at=now())
+                    task["attempts"][-1].update(
+                        status=child["status"] if child else "cancelled",
+                        finished_at=now(),
+                    )
                 dirty = True
                 continue
             if child:
                 attempt = task["attempts"][-1]
                 attempt.setdefault("admitted_at", attempt["created_at"])
-                timestamps = {"created_at": child.get("compute_created_at") or child.get("created_at"), "started_at": child.get("started_at")}
+                timestamps = {
+                    "created_at": child.get("compute_created_at")
+                    or child.get("created_at"),
+                    "started_at": child.get("started_at"),
+                }
                 for field, value in timestamps.items():
                     if value is not None and attempt.get(field) != value:
                         attempt[field] = value
@@ -305,24 +621,49 @@ class WorkflowManager:
                         dirty = True
                     continue
                 if attempt.get("finished_at") is None:
-                    attempt.update(status=child["status"], finished_at=child.get("finished_at") or now(), error=child.get("error"))
+                    attempt.update(
+                        status=child["status"],
+                        finished_at=child.get("finished_at") or now(),
+                        error=child.get("error"),
+                    )
                     task["error"] = child.get("error")
                     spec = run["_specs"][task["key"]]["task"]
-                    retryable = child["status"] == "failed" and child.get("error_class") not in ("unknown_outcome", "configuration", "permissions", "cancelled")
-                    if retryable and spec.get("retry_safe") and len(task["attempts"]) <= spec.get("max_retries", 0):
-                        task.update(status="waiting_retry", next_retry_at=(datetime.now(timezone.utc) + timedelta(seconds=spec.get("retry_delay_seconds", 30))).isoformat())
+                    retryable = child["status"] == "failed" and child.get(
+                        "error_class"
+                    ) not in (
+                        "unknown_outcome",
+                        "configuration",
+                        "permissions",
+                        "cancelled",
+                    )
+                    if (
+                        retryable
+                        and spec.get("retry_safe")
+                        and len(task["attempts"]) <= spec.get("max_retries", 0)
+                    ):
+                        task.update(
+                            status="waiting_retry",
+                            next_retry_at=(
+                                datetime.now(timezone.utc)
+                                + timedelta(seconds=spec.get("retry_delay_seconds", 30))
+                            ).isoformat(),
+                        )
                     else:
                         task["status"] = child["status"]
                     dirty = True
                 if task["status"] != "waiting_retry":
                     continue
-                if datetime.now(timezone.utc) < datetime.fromisoformat(task["next_retry_at"]):
+                if datetime.now(timezone.utc) < datetime.fromisoformat(
+                    task["next_retry_at"]
+                ):
                     continue
                 task.update(status="pending", run_id=None, error=None)
                 task.pop("next_retry_at", None)
                 dirty = True
             dependencies = [by_key[key]["status"] for key in task.get("depends_on", [])]
-            if any(status in ("failed", "skipped", "cancelled") for status in dependencies):
+            if any(
+                status in ("failed", "skipped", "cancelled") for status in dependencies
+            ):
                 task.update(status="skipped", error="An upstream task did not succeed")
                 dirty = True
                 continue
@@ -338,15 +679,37 @@ class WorkflowManager:
                 # by that record. Do not infer whether remote code has run.
                 if task.get("run_id") and self.store.get("runs", task["run_id"]):
                     continue
-                task.update(status="failed", error="Task admission failed; check permissions, source, and pinned artifacts")
+                task.update(
+                    status="failed",
+                    error="Task admission failed; check permissions, source, and pinned artifacts",
+                )
                 if task["attempts"]:
-                    task["attempts"][-1].update(status="failed", finished_at=now(), error=task["error"])
+                    task["attempts"][-1].update(
+                        status="failed", finished_at=now(), error=task["error"]
+                    )
                 dirty = True
         complete = sum(task["status"] in TERMINAL for task in run["tasks"])
         run["progress"] = {"completed": complete, "total": len(run["tasks"])}
         if complete == len(run["tasks"]):
-            status = "cancelled" if run.get("_cancel_requested") else ("succeeded" if all(task["status"] == "succeeded" for task in run["tasks"]) else "failed")
-            run.update(status=status, finished_at=now(), error=None if status == "succeeded" else run.get("error") or "One or more workflow tasks did not succeed")
+            status = (
+                "cancelled"
+                if run.get("_cancel_requested")
+                else (
+                    "succeeded"
+                    if all(task["status"] == "succeeded" for task in run["tasks"])
+                    else "failed"
+                )
+            )
+            run.update(
+                status=status,
+                finished_at=now(),
+                error=(
+                    None
+                    if status == "succeeded"
+                    else run.get("error")
+                    or "One or more workflow tasks did not succeed"
+                ),
+            )
             dirty = True
         if dirty:
             self.store.put("workflow_runs", run)
@@ -357,7 +720,9 @@ class WorkflowManager:
         while not self.stopped.wait(0.25):
             with self.lock:
                 with self.store.connect() as db:
-                    rows = db.execute("SELECT body FROM documents WHERE kind='workflow_runs' AND status IN ('queued','running') ORDER BY created_at,id").fetchall()
+                    rows = db.execute(
+                        "SELECT body FROM documents WHERE kind='workflow_runs' AND status IN ('queued','running') ORDER BY created_at,id"
+                    ).fetchall()
                 for row in rows:
                     run = json.loads(row[0])
                     try:
@@ -384,21 +749,55 @@ class WorkflowManager:
         with self.lock:
             old = self.store.get("workflow_runs", identifier)
             if not old or old["status"] not in TERMINAL:
-                raise ValueError("Only a finished workflow run can be repaired or rerun")
+                raise ValueError(
+                    "Only a finished workflow run can be repaired or rerun"
+                )
             self._authorize(user, old["project_id"], "run")
-            selected = set(task_keys or [task["key"] for task in old["tasks"] if task["status"] != "succeeded"])
+            selected = set(
+                task_keys
+                or [
+                    task["key"]
+                    for task in old["tasks"]
+                    if task["status"] != "succeeded"
+                ]
+            )
             if selected - old["_specs"].keys():
                 raise ValueError("Unknown workflow task key")
             changed = True
             while changed:
                 previous = len(selected)
-                selected.update(task["key"] for task in old["tasks"] if selected.intersection(task.get("depends_on", [])))
+                selected.update(
+                    task["key"]
+                    for task in old["tasks"]
+                    if selected.intersection(task.get("depends_on", []))
+                )
                 changed = len(selected) != previous
-            preserve = {task["key"] for task in old["tasks"] if task["status"] == "succeeded" and task["key"] not in selected} if repair else set()
+            preserve = (
+                {
+                    task["key"]
+                    for task in old["tasks"]
+                    if task["status"] == "succeeded" and task["key"] not in selected
+                }
+                if repair
+                else set()
+            )
             if repair and not selected:
                 raise ValueError("There are no failed tasks to repair")
-            workflow = {"id": old["workflow_id"], "name": old["name"], "project_id": old["project_id"]}
-            return self._new_run(workflow, old["parameters"], old["_specs"], user, "repair" if repair else "rerun", old.get("job_id"), old, preserve)
+            workflow = {
+                "id": old["workflow_id"],
+                "name": old["name"],
+                "project_id": old["project_id"],
+            }
+            return self._new_run(
+                workflow,
+                old["parameters"],
+                old["_specs"],
+                user,
+                "repair" if repair else "rerun",
+                old.get("job_id"),
+                old,
+                preserve,
+            )
 
 
 def register_workflow_routes(app, authenticated, access):
@@ -410,46 +809,96 @@ def register_workflow_routes(app, authenticated, access):
         return value
 
     @app.get("/api/workflows")
-    def listing(request: Request, project_id: str = "default", user=Depends(authenticated)):
+    def listing(
+        request: Request, project_id: str = "default", user=Depends(authenticated)
+    ):
         access.require_project(user, project_id, "read")
-        return public([item for item in request.app.state.store.list("workflows") if item.get("project_id", "default") == project_id])
+        return public(
+            [
+                item
+                for item in request.app.state.store.list("workflows")
+                if item.get("project_id", "default") == project_id
+            ]
+        )
 
     @app.post("/api/workflows", status_code=201)
     def create(body: WorkflowInput, request: Request, user=Depends(authenticated)):
         value = request.app.state.workflows.validate(body.model_dump(), user)
-        return public(request.app.state.store.put("workflows", {**value, "id": uuid4().hex, "created_at": now(), "updated_at": now()}))
+        return public(
+            request.app.state.store.put(
+                "workflows",
+                {**value, "id": uuid4().hex, "created_at": now(), "updated_at": now()},
+            )
+        )
 
     @app.get("/api/workflows/page")
-    def page(request: Request, project_id: str = "default", search: str = "", limit: int = 25, offset: int = 0, user=Depends(authenticated)):
+    def page(
+        request: Request,
+        project_id: str = "default",
+        search: str = "",
+        limit: int = 25,
+        offset: int = 0,
+        user=Depends(authenticated),
+    ):
         access.require_project(user, project_id, "read")
         limit, offset = max(1, min(limit, 100)), max(0, offset)
         where = "kind='workflows' AND COALESCE(json_extract(body,'$.project_id'),'default')=? AND instr(lower(name),lower(?))>0"
         params = (project_id, search)
         with request.app.state.store.connect() as db:
-            total = db.execute("SELECT COUNT(*) FROM documents WHERE " + where, params).fetchone()[0]
-            rows = db.execute("SELECT body FROM documents WHERE " + where + " ORDER BY updated_at DESC,id LIMIT ? OFFSET ?", (*params, limit, offset)).fetchall()
-        return {"items": [public(json.loads(row[0])) for row in rows], "total": total, "limit": limit, "offset": offset}
+            total = db.execute(
+                "SELECT COUNT(*) FROM documents WHERE " + where, params
+            ).fetchone()[0]
+            rows = db.execute(
+                "SELECT body FROM documents WHERE "
+                + where
+                + " ORDER BY updated_at DESC,id LIMIT ? OFFSET ?",
+                (*params, limit, offset),
+            ).fetchall()
+        return {
+            "items": [public(json.loads(row[0])) for row in rows],
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+        }
 
     @app.get("/api/workflows/{id}")
     def detail(id: str, request: Request, user=Depends(authenticated)):
         return public(lookup(request, "workflows", id, user))
 
     @app.put("/api/workflows/{id}")
-    def update(id: str, body: WorkflowInput, request: Request, user=Depends(authenticated)):
+    def update(
+        id: str, body: WorkflowInput, request: Request, user=Depends(authenticated)
+    ):
         old = lookup(request, "workflows", id, user, "edit")
         if body.project_id != old.get("project_id", "default"):
             raise ValueError("Move workflow projects through a new definition")
         value = request.app.state.workflows.validate(body.model_dump(), user)
-        return public(request.app.state.store.put("workflows", {**value, "id": id, "created_at": old["created_at"], "updated_at": now()}))
+        return public(
+            request.app.state.store.put(
+                "workflows",
+                {
+                    **value,
+                    "id": id,
+                    "created_at": old["created_at"],
+                    "updated_at": now(),
+                },
+            )
+        )
 
     @app.delete("/api/workflows/{id}")
     def delete(id: str, request: Request, user=Depends(authenticated)):
         lookup(request, "workflows", id, user, "edit")
         store = request.app.state.store
         with store.connect() as db:
-            linked = db.execute("SELECT 1 FROM documents WHERE (kind='jobs' AND json_extract(body,'$.workflow_id')=?) OR (kind='workflow_runs' AND json_extract(body,'$.workflow_id')=? AND status IN ('queued','running')) LIMIT 1", (id, id)).fetchone()
+            linked = db.execute(
+                "SELECT 1 FROM documents WHERE (kind='jobs' AND json_extract(body,'$.workflow_id')=?) OR (kind='workflow_runs' AND json_extract(body,'$.workflow_id')=? AND status IN ('queued','running')) LIMIT 1",
+                (id, id),
+            ).fetchone()
         if linked:
-            raise HTTPException(409, "Remove schedules and finish active runs before deleting this workflow")
+            raise HTTPException(
+                409,
+                "Remove schedules and finish active runs before deleting this workflow",
+            )
         store.delete("workflows", id)
         return {"ok": True}
 
@@ -459,18 +908,40 @@ def register_workflow_routes(app, authenticated, access):
         return public(request.app.state.workflows.submit(value, body.parameters, user))
 
     @app.get("/api/workflow-runs")
-    def runs(request: Request, workflow_id: str | None = None, project_id: str = "default", limit: int = 25, offset: int = 0, user=Depends(authenticated)):
+    def runs(
+        request: Request,
+        workflow_id: str | None = None,
+        project_id: str = "default",
+        limit: int = 25,
+        offset: int = 0,
+        user=Depends(authenticated),
+    ):
         access.require_project(user, project_id, "read")
         limit, offset = max(1, min(limit, 100)), max(0, offset)
-        where, params = "kind='workflow_runs' AND COALESCE(json_extract(body,'$.project_id'),'default')=?", [project_id]
+        where, params = (
+            "kind='workflow_runs' AND COALESCE(json_extract(body,'$.project_id'),'default')=?",
+            [project_id],
+        )
         if workflow_id:
             lookup(request, "workflows", workflow_id, user)
             where += " AND json_extract(body,'$.workflow_id')=?"
             params.append(workflow_id)
         with request.app.state.store.connect() as db:
-            total = db.execute("SELECT COUNT(*) FROM documents WHERE " + where, params).fetchone()[0]
-            rows = db.execute("SELECT json_remove(body,'$._specs','$._actor') FROM documents WHERE " + where + " ORDER BY created_at DESC,id DESC LIMIT ? OFFSET ?", (*params, limit, offset)).fetchall()
-        return {"items": [public(json.loads(row[0])) for row in rows], "total": total, "limit": limit, "offset": offset}
+            total = db.execute(
+                "SELECT COUNT(*) FROM documents WHERE " + where, params
+            ).fetchone()[0]
+            rows = db.execute(
+                "SELECT json_remove(body,'$._specs','$._actor') FROM documents WHERE "
+                + where
+                + " ORDER BY created_at DESC,id DESC LIMIT ? OFFSET ?",
+                (*params, limit, offset),
+            ).fetchall()
+        return {
+            "items": [public(json.loads(row[0])) for row in rows],
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+        }
 
     @app.get("/api/workflow-runs/{id}")
     def run_detail(id: str, request: Request, user=Depends(authenticated)):
@@ -481,8 +952,14 @@ def register_workflow_routes(app, authenticated, access):
         return public(request.app.state.workflows.cancel(id, user))
 
     @app.post("/api/workflow-runs/{id}/repair", status_code=202)
-    def repair(id: str, body: RepairInput, request: Request, user=Depends(authenticated)):
-        return public(request.app.state.workflows.replay(id, user, repair=True, task_keys=body.task_keys))
+    def repair(
+        id: str, body: RepairInput, request: Request, user=Depends(authenticated)
+    ):
+        return public(
+            request.app.state.workflows.replay(
+                id, user, repair=True, task_keys=body.task_keys
+            )
+        )
 
     @app.post("/api/workflow-runs/{id}/rerun", status_code=202)
     def rerun(id: str, request: Request, user=Depends(authenticated)):

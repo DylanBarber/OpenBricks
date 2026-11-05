@@ -3,6 +3,7 @@
 This is trusted code execution, not an untrusted-user sandbox. Its parent owns
 the execution queue, timeout, and process-group cancellation.
 """
+
 from __future__ import annotations
 
 import ast
@@ -22,10 +23,10 @@ from typing import Any
 
 from .blob import LocalBlobStore, LocalFS
 
-
 MAX_ROWS = 200
 MAX_OUTPUT = 100_000
 _spark = None
+_spark_lease = None
 _scopes: dict[str, dict[str, Any]] = {}
 
 
@@ -46,7 +47,9 @@ class CappedOutput(io.StringIO):
         return len(value)
 
     def text(self) -> str:
-        return self.getvalue() + ("\n[Output truncated at 100 KB]" if self.truncated else "")
+        return self.getvalue() + (
+            "\n[Output truncated at 100 KB]" if self.truncated else ""
+        )
 
 
 def prepare_metastore_path(data_dir):
@@ -56,7 +59,11 @@ def prepare_metastore_path(data_dir):
     a symlink, or files appearing after the emptiness check are never removed.
     """
     metastore = Path(data_dir).resolve() / "metastore"
-    if metastore.is_dir() and not metastore.is_symlink() and not any(metastore.iterdir()):
+    if (
+        metastore.is_dir()
+        and not metastore.is_symlink()
+        and not any(metastore.iterdir())
+    ):
         try:
             metastore.rmdir()
         except OSError:
@@ -69,23 +76,40 @@ def prepare_metastore_path(data_dir):
 def spark_session(data_dir: str):
     global _spark
     if _spark is None:
+        if _spark_lease is not None:
+            _spark_lease()
         from pyspark.sql import SparkSession
+
         root = Path(data_dir).resolve()
         warehouse = root / "warehouse"
         warehouse.mkdir(parents=True, exist_ok=True)
         metastore = prepare_metastore_path(root)
         # A single worker owns this local Derby metastore and SparkContext.
-        builder = (SparkSession.builder.appName("OpenBricks")
+        builder = (
+            SparkSession.builder.appName("OpenBricks")
             .master(os.environ.get("SPARK_MASTER", "local[*]"))
             .config("spark.sql.warehouse.dir", warehouse.as_uri())
-            .config("spark.hadoop.javax.jdo.option.ConnectionURL", f"jdbc:derby:;databaseName={metastore};create=true")
-            .config("spark.driver.bindAddress", os.environ.get("SPARK_DRIVER_BIND_ADDRESS", "127.0.0.1"))
-            .config("spark.driver.host", os.environ.get("SPARK_DRIVER_HOST", "127.0.0.1"))
+            .config(
+                "spark.hadoop.javax.jdo.option.ConnectionURL",
+                f"jdbc:derby:;databaseName={metastore};create=true",
+            )
+            .config(
+                "spark.driver.bindAddress",
+                os.environ.get("SPARK_DRIVER_BIND_ADDRESS", "127.0.0.1"),
+            )
+            .config(
+                "spark.driver.host", os.environ.get("SPARK_DRIVER_HOST", "127.0.0.1")
+            )
             .config("spark.driver.memory", os.environ.get("SPARK_DRIVER_MEMORY", "1g"))
             .config("spark.ui.enabled", "false")
-            .config("spark.sql.shuffle.partitions", os.environ.get("SPARK_SHUFFLE_PARTITIONS", "8"))
-            .enableHiveSupport())
+            .config(
+                "spark.sql.shuffle.partitions",
+                os.environ.get("SPARK_SHUFFLE_PARTITIONS", "8"),
+            )
+            .enableHiveSupport()
+        )
         from .spark_catalog import configure_catalog
+
         _spark = configure_catalog(builder).getOrCreate()
         _spark.sparkContext.setLogLevel("WARN")
     return _spark
@@ -128,27 +152,60 @@ def serializable(value: Any) -> Any:
 
 def table(value: Any) -> dict | None:
     # Import Spark only after a Spark object is actually present.
-    if type(value).__module__.startswith("pyspark") and hasattr(value, "columns") and hasattr(value, "take"):
-        return {"columns": list(value.columns), "rows": [[serializable(v) for v in row] for row in value.take(MAX_ROWS)]}
-    if type(value).__module__.startswith("pandas") and hasattr(value, "columns") and hasattr(value, "head"):
-        return {"columns": [str(c) for c in value.columns], "rows": serializable(value.head(MAX_ROWS).values.tolist())}
+    if (
+        type(value).__module__.startswith("pyspark")
+        and hasattr(value, "columns")
+        and hasattr(value, "take")
+    ):
+        return {
+            "columns": list(value.columns),
+            "rows": [[serializable(v) for v in row] for row in value.take(MAX_ROWS)],
+        }
+    if (
+        type(value).__module__.startswith("pandas")
+        and hasattr(value, "columns")
+        and hasattr(value, "head")
+    ):
+        return {
+            "columns": [str(c) for c in value.columns],
+            "rows": serializable(value.head(MAX_ROWS).values.tolist()),
+        }
     if isinstance(value, list) and value and isinstance(value[0], dict):
         columns = list(dict.fromkeys(str(k) for row in value[:MAX_ROWS] for k in row))
-        return {"columns": columns, "rows": [[serializable(row.get(c)) for c in columns] for row in value[:MAX_ROWS]]}
+        return {
+            "columns": columns,
+            "rows": [
+                [serializable(row.get(c)) for c in columns] for row in value[:MAX_ROWS]
+            ],
+        }
     return None
 
 
-def execute_cell(cell: dict, scope: dict, data_dir: str, on_log=None, redactor=None) -> dict:
+def execute_cell(
+    cell: dict, scope: dict, data_dir: str, on_log=None, redactor=None
+) -> dict:
     started = time.monotonic()
     from .execution import Redactor, StreamRedactor
+
     redactor = redactor or Redactor()
     streams = {name: StreamRedactor(redactor) for name in ("stdout", "stderr")}
+
     def stream(name, value="", final=False):
         safe = streams[name].feed(value, final=final)
         if safe and on_log:
             on_log(name, safe)
-    stdout, stderr = CappedOutput(lambda value: stream("stdout", value)), CappedOutput(lambda value: stream("stderr", value))
-    output = {"cell_id": cell["id"], "status": "succeeded", "stdout": "", "stderr": "", "result": None, "duration_ms": 0}
+
+    stdout, stderr = CappedOutput(lambda value: stream("stdout", value)), CappedOutput(
+        lambda value: stream("stderr", value)
+    )
+    output = {
+        "cell_id": cell["id"],
+        "status": "succeeded",
+        "stdout": "",
+        "stderr": "",
+        "result": None,
+        "duration_ms": 0,
+    }
 
     def display(value: Any) -> None:
         result = table(value)
@@ -169,11 +226,20 @@ def execute_cell(cell: dict, scope: dict, data_dir: str, on_log=None, redactor=N
             if language == "sql":
                 display(spark_session(data_dir).sql(source))
             elif language == "python":
-                tree = ast.parse(source, filename=f"<notebook-cell-{cell['id']}>", mode="exec")
+                tree = ast.parse(
+                    source, filename=f"<notebook-cell-{cell['id']}>", mode="exec"
+                )
                 if tree.body and isinstance(tree.body[-1], ast.Expr):
                     final = tree.body.pop()
                     exec(compile(tree, f"<notebook-cell-{cell['id']}>", "exec"), scope)
-                    value = eval(compile(ast.Expression(final.value), f"<notebook-cell-{cell['id']}>", "eval"), scope)
+                    value = eval(
+                        compile(
+                            ast.Expression(final.value),
+                            f"<notebook-cell-{cell['id']}>",
+                            "eval",
+                        ),
+                        scope,
+                    )
                     if value is not None:
                         display(value)
                 else:
@@ -183,7 +249,11 @@ def execute_cell(cell: dict, scope: dict, data_dir: str, on_log=None, redactor=N
         except BaseException:
             output["status"] = "failed"
             traceback.print_exc(file=stderr)
-    output.update(stdout=stdout.text(), stderr=stderr.text(), duration_ms=round((time.monotonic() - started) * 1000))
+    output.update(
+        stdout=stdout.text(),
+        stderr=stderr.text(),
+        duration_ms=round((time.monotonic() - started) * 1000),
+    )
     stream("stdout", final=True)
     stream("stderr", final=True)
     safe = redactor.clean(output)
@@ -192,7 +262,22 @@ def execute_cell(cell: dict, scope: dict, data_dir: str, on_log=None, redactor=N
 
 
 def run_request(request: dict, emit) -> None:
+    global _spark_lease
     run_id = request["run_id"]
+    if os.getenv("OPENBRICKS_SPARK_LEASE_PROTOCOL") == "1":
+
+        def acquire():
+            emit({"type": "spark_lease_request", "run_id": run_id})
+            answer = json.loads(sys.stdin.readline())
+            if (
+                answer.get("type") != "spark_lease_granted"
+                or answer.get("run_id") != run_id
+            ):
+                raise RuntimeError(
+                    "Compute did not grant the local Spark catalog lease"
+                )
+
+        _spark_lease = acquire
     data_dir = request["data_dir"]
     package_dir = str(Path(request["package_dir"]).resolve())
     if package_dir not in sys.path:
@@ -207,10 +292,16 @@ def run_request(request: dict, emit) -> None:
         _scopes.pop(notebook_id, None)
     if notebook_id not in _scopes:
         blob = LocalBlobStore(Path(data_dir) / "buckets")
-        _scopes[notebook_id] = {"__name__": "__main__", "spark": SparkProxy(data_dir),
-            "sc": ContextProxy(data_dir), "blob": blob, "dbutils": SimpleNamespace(fs=LocalFS(blob))}
+        _scopes[notebook_id] = {
+            "__name__": "__main__",
+            "spark": SparkProxy(data_dir),
+            "sc": ContextProxy(data_dir),
+            "blob": blob,
+            "dbutils": SimpleNamespace(fs=LocalFS(blob)),
+        }
     scope = _scopes[notebook_id]
     from .parameters import Widgets
+
     parameters = request.get("parameters", {})
     scope["params"] = dict(parameters)
     widgets = getattr(scope["dbutils"], "widgets", None)
@@ -219,14 +310,20 @@ def run_request(request: dict, emit) -> None:
         scope["dbutils"].widgets = widgets
     else:
         from .parameters import widget_text
-        widgets.values.update({name: widget_text(value) for name, value in parameters.items()})
+
+        widgets.values.update(
+            {name: widget_text(value) for name, value in parameters.items()}
+        )
     # Connections refresh per request, so edits and revocations apply to the
     # next cell without persisting plaintext credentials in notebook files.
     from .connectors import ConnectionRegistry
+
     scope["connections"] = ConnectionRegistry(request.get("connections", []))
     from .spark_catalog import SparkCatalogHelper
+
     scope["catalog"] = SparkCatalogHelper(lambda: spark_session(data_dir))
     from .execution import Redactor
+
     redactor = Redactor(request.get("connections", []))
     raw_emit = emit
     emit = lambda event: raw_emit(redactor.event(event))
@@ -235,19 +332,48 @@ def run_request(request: dict, emit) -> None:
     except ImportError:
         pass
     else:
-        scope["data"] = ComputeDataWorkspace(lambda: spark_session(data_dir), scope["connections"], scope["blob"], emit, run_id, project_id=request.get("project_id", "default"))
+        scope["data"] = ComputeDataWorkspace(
+            lambda: spark_session(data_dir),
+            scope["connections"],
+            scope["blob"],
+            emit,
+            run_id,
+            project_id=request.get("project_id", "default"),
+        )
     error = None
     for index, cell in enumerate(request["cells"]):
-        emit({"type": "progress", "run_id": run_id, "cell_id": cell["id"], "cell_index": index, "total_cells": len(request["cells"])})
+        emit(
+            {
+                "type": "progress",
+                "run_id": run_id,
+                "cell_id": cell["id"],
+                "cell_index": index,
+                "total_cells": len(request["cells"]),
+            }
+        )
         pending_logs, last_log = {"stdout": "", "stderr": ""}, [0.0]
+
         def on_log(stream, text, final=False):
             pending_logs[stream] += text
-            if not final and time.monotonic() - last_log[0] < 0.1 and len(pending_logs[stream]) < 4096:
+            if (
+                not final
+                and time.monotonic() - last_log[0] < 0.1
+                and len(pending_logs[stream]) < 4096
+            ):
                 return
             value, pending_logs[stream] = pending_logs[stream], ""
             for offset in range(0, len(value), 8192):
-                emit({"type": "log", "run_id": run_id, "cell_id": cell["id"], "stream": stream, "text": value[offset:offset + 8192]})
+                emit(
+                    {
+                        "type": "log",
+                        "run_id": run_id,
+                        "cell_id": cell["id"],
+                        "stream": stream,
+                        "text": value[offset : offset + 8192],
+                    }
+                )
             last_log[0] = time.monotonic()
+
         output = execute_cell(cell, scope, data_dir, on_log=on_log, redactor=redactor)
         for stream in pending_logs:
             on_log(stream, "", final=True)
@@ -255,17 +381,29 @@ def run_request(request: dict, emit) -> None:
         if output["status"] == "failed":
             error = output["stderr"]
             break
-    emit({"type": "done", "run_id": run_id, "status": "failed" if error else "succeeded", "error": error})
+    emit(
+        {
+            "type": "done",
+            "run_id": run_id,
+            "status": "failed" if error else "succeeded",
+            "error": error,
+        }
+    )
 
 
 def main() -> None:
     # Keep native/JVM stdout away from the protocol. Python cell output still
     # goes through redirect_stdout above and is captured per cell.
-    protocol = os.fdopen(os.dup(sys.stdout.fileno()), "w", encoding="utf-8", buffering=1)
+    protocol = os.fdopen(
+        os.dup(sys.stdout.fileno()), "w", encoding="utf-8", buffering=1
+    )
     os.dup2(sys.stderr.fileno(), sys.stdout.fileno())
 
     def emit(message: dict) -> None:
-        protocol.write(json.dumps(serializable(message), default=serializable, allow_nan=False) + "\n")
+        protocol.write(
+            json.dumps(serializable(message), default=serializable, allow_nan=False)
+            + "\n"
+        )
         protocol.flush()
 
     try:
@@ -276,7 +414,17 @@ def main() -> None:
                 run_request(request, emit)
             except BaseException:
                 from .execution import Redactor
-                emit(Redactor(request.get("connections", [])).event({"type": "done", "run_id": request.get("run_id"), "status": "failed", "error": traceback.format_exc()}))
+
+                emit(
+                    Redactor(request.get("connections", [])).event(
+                        {
+                            "type": "done",
+                            "run_id": request.get("run_id"),
+                            "status": "failed",
+                            "error": traceback.format_exc(),
+                        }
+                    )
+                )
     finally:
         if _spark is not None:
             _spark.stop()

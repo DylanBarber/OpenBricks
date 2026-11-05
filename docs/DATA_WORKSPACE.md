@@ -102,7 +102,40 @@ Vacuum requires at least 168 hours of retention. The helpers do not disable Delt
 
 ## Incremental SQL Server → Delta imports
 
-Create an import definition with a SQL Server connection, source schema/table, Delta sink path or table, merge keys, and watermark column/type. The first run reads after an optional initial watermark; later runs read strictly greater than the last successful watermark. Numeric, timestamp, date, and string watermarks are supported.
+### Change Tracking mode
+
+Choose **Change Tracking** for synchronization of current rows, including inserts, updates, and deletions. It uses SQL Server Change Tracking rather than CDC capture tables. The source needs a primary key, database snapshot isolation, and Change Tracking enabled on the database and table. Ask the database administrator to configure retention longer than the longest expected ingestion outage. For example, on a disposable database:
+
+```sql
+ALTER DATABASE Example SET ALLOW_SNAPSHOT_ISOLATION ON;
+ALTER DATABASE Example SET CHANGE_TRACKING = ON
+    (CHANGE_RETENTION = 7 DAYS, AUTO_CLEANUP = ON);
+ALTER TABLE dbo.Orders ENABLE CHANGE_TRACKING;
+```
+
+Grant the connector account the required read and `VIEW CHANGE TRACKING` permissions. Merge keys must match the complete source primary key. Use a new Delta sink owned by this ingestion; an unrelated pre-existing table is rejected.
+
+```json
+{
+  "project_id": "default",
+  "name": "Orders synchronization",
+  "mode": "change_tracking",
+  "connection_id": "YOUR_SQL_SERVER_CONNECTION_ID",
+  "source": {"schema": "dbo", "table": "Orders"},
+  "sink": {"path": "blob://silver/orders_sync"},
+  "keys": ["OrderId"],
+  "jdbc": {"fetch_size": 4096},
+  "checks": []
+}
+```
+
+The first run snapshots the source. Later runs read `CHANGETABLE` and current values inside one snapshot transaction, stream bounded batches through temporary Parquet, and merge inserts/updates/deletes into Delta. Checkpoints advance only after the whole run succeeds. Replaying an interrupted batch is idempotent by primary key. Initial replay can reconcile missing source rows only within the sink owned by this ingestion.
+
+Source identity, column/type/length/nullability, and primary-key changes are checked before writing. An expired checkpoint, source reset, or schema change stops the run. Review the source and create a new ingestion with a new sink for a fresh snapshot; the application does not silently discard a checkpoint or evolve a schema. Unsupported source types fail explicitly. Parallel JDBC partition options are unavailable in this mode because the read uses one snapshot connection. Change Tracking does not preserve every intermediate row version or historical event.
+
+### Watermark mode
+
+Choose **Watermark** and create an import definition with a SQL Server connection, source schema/table, Delta sink path or table, merge keys, and watermark column/type. The first run reads after an optional initial watermark; later runs read strictly greater than the last successful watermark. Numeric, timestamp, date, and string watermarks are supported.
 
 The source must have non-null merge keys and watermark values, with one current row per key in a batch. The sink uses Delta `MERGE` to update matching keys and insert new keys. Quality checks run before writing. The new watermark is considered only after the sink succeeds and is committed to the saved definition only after the **entire run** succeeds. A later cell failure, cancellation, sink error, or quality failure leaves the prior watermark unchanged. A retry can re-read the batch; key-based merge makes replay idempotent.
 
@@ -112,12 +145,31 @@ This is batch watermark ingestion, not SQL Server CDC. It does not propagate sou
 
 ## HTTP API
 
+### DuckDB file queries
+
+In the SQL workspace choose **DuckDB**, then add a dataset alias, a `blob://bucket/file` path, and CSV, Parquet, JSON, or JSONL format. Select an assigned S3 connection for `s3://bucket/key` sources. Query the aliases with ordinary SQL:
+
+```sql
+SELECT customer, sum(amount) AS total
+FROM orders
+GROUP BY customer
+ORDER BY total DESC
+```
+
+The source list is saved with the query in `payload.sources`:
+
+```json
+{"sources": [{"name": "orders", "path": "blob://bronze/orders.csv", "format": "csv"}]}
+```
+
+DuckDB runs inside a budgeted job worker without starting Spark. Local sources are confined to local buckets; S3 objects are staged with the selected connection, bounded to 256 MB per object. Memory/threads and result previews are bounded, and extension installation/loading is disabled. Use Spark for larger distributed datasets and Delta operations. Trusted SQL authors still execute with the compute account's privileges; this is not an SQL sandbox for hostile queries.
+
 All paths below begin `/api/data` and require login/project access. List responses are `{items,total,limit,offset}`; `limit` defaults to 25 and is capped at 100 for stored metadata.
 
 | Method/path | Contract |
 | --- | --- |
 | `GET /queries?project_id=&search=&limit=&offset=` | Saved queries in the selected project |
-| `POST /queries`, `PUT /queries/{id}` | `{project_id,name,description?,engine,sql,params:[],connection_id?,cluster_id?}` |
+| `POST /queries`, `PUT /queries/{id}` | `{project_id,name,description?,engine,sql,params:[],connection_id?,cluster_id?,payload:{sources:[]}}` |
 | `DELETE /queries/{id}` | Delete saved query, preserving execution history |
 | `POST /execute` | `{project_id,cluster_id?,query_id?,operation,engine,connection_id?,sql?,params:[],catalog?,schema?,table?,limit:100,offset:0,payload:{}}` → execution metadata with `id` and `run_id` (202) |
 | `GET /executions?project_id=&query_id=&limit=&offset=` | Paged execution metadata |
@@ -151,6 +203,6 @@ Notebook access to named connections is explicit: assign the connection to the p
 
 ## Validation
 
-Protocol/permission tests cover paging, parameter/options handling, strict credential selection, explicit Delta maintenance, duplicate event replay, saved-query editor changes, ingestion overlap protection, and checkpoint advancement only after full success. Enable `OPENBRICKS_TEST_SPARK=1` in the packaged Java 17/Spark test environment to run the real DataFrame quality test. A live SQL Server ingestion round trip is a separate integration check requiring an actual database endpoint.
+Protocol/permission tests cover paging, parameter/options handling, strict credential selection, explicit Delta maintenance, duplicate event replay, saved-query editor changes, ingestion overlap protection, and checkpoint advancement only after full success. Enable `OPENBRICKS_TEST_SPARK=1` in the packaged Java 17/Spark test environment for real DataFrame checks. The opt-in [SQL Server test harness](../compose.sql-tests.yaml) creates and removes a uniquely named test database. Its real ODBC/JDBC tests cover parameter binding, transactional rollback, more than 12,000 rows, Change Tracking insert/update/delete replay into Delta, schema drift, sink ownership, and invalid checkpoints. Run it only against disposable test infrastructure; see [verification](../VERIFICATION.md).
 
 The native JDBC behavior follows [Spark's JDBC documentation](https://spark.apache.org/docs/4.0.1/sql-data-sources-jdbc.html). Driver packaging uses [Microsoft JDBC 13.6.0 for Java 11+](https://learn.microsoft.com/en-us/sql/connect/jdbc/release-notes-for-the-jdbc-driver?view=sql-server-ver17); Delta 4.3.1 matches the existing Spark 4.0 jars and [Delta's Spark compatibility guidance](https://docs.delta.io/releases/).

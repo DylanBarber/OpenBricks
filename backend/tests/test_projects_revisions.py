@@ -34,6 +34,27 @@ def project(client, name):
     return response.json()["id"]
 
 
+def test_service_account_cannot_become_project_owner_through_membership_api(client):
+    response = client.post(
+        "/api/service-accounts",
+        json={
+            "name": "deployment-bot",
+            "grants": [{"project_id": "default", "role": "editor"}],
+        },
+    )
+    response.raise_for_status()
+    identifier = response.json()["id"]
+    rejected = client.put(
+        f"/api/projects/default/members/{identifier}", json={"role": "owner"}
+    )
+    assert rejected.status_code == 400
+    members = client.get("/api/projects/default/members").json()
+    assert (
+        next(item for item in members if item["user_id"] == identifier)["role"]
+        == "editor"
+    )
+
+
 def notebook(client, project_id="default", name="Notebook"):
     response = client.post(
         "/api/notebooks",

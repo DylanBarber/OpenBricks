@@ -1,0 +1,42 @@
+# Disposable SQL Server integration harness. This project never mounts the
+# OpenBricks production volume or publishes SQL Server on the host network.
+name: openbricks-sql-tests
+services:
+  sqlserver:
+    image: mcr.microsoft.com/mssql/server:2025-latest@sha256:245f6b1c8903edae52cb20fa31419cefcde1a49938bb8c3447099011fc871ca3
+    platform: linux/amd64
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_PID: Developer
+      MSSQL_SA_PASSWORD: ${OPENBRICKS_SQLSERVER_PASSWORD:?Set a strong disposable test password}
+      MSSQL_MEMORY_LIMIT_MB: "1800"
+    mem_limit: 2560m
+    memswap_limit: 2560m
+    healthcheck:
+      test: [CMD-SHELL, 'SQLCMDPASSWORD="$$MSSQL_SA_PASSWORD" /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -C -Q "SELECT 1" -b -l 5 >/dev/null']
+      interval: 5s
+      timeout: 8s
+      start_period: 60s
+      retries: 24
+    stop_grace_period: 30s
+  tests:
+    image: ${OPENBRICKS_TEST_COMPUTE_IMAGE:-openbricks-compute:test}
+    build:
+      context: .
+      target: compute
+      args:
+        OPENBRICKS_BUILD_ID: ${OPENBRICKS_BUILD_ID:-development}
+        OPENBRICKS_VERSION: 0.4.0-beta.1
+    environment:
+      OPENBRICKS_TEST_SQLSERVER: "1"
+      OPENBRICKS_SQLSERVER_HOST: sqlserver
+      OPENBRICKS_SQLSERVER_USERNAME: sa
+      OPENBRICKS_SQLSERVER_PASSWORD: ${OPENBRICKS_SQLSERVER_PASSWORD:?Set a strong disposable test password}
+      SPARK_MASTER: local[1]
+      SPARK_DRIVER_MEMORY: 1g
+    command: [python, -m, pytest, -q, -p, "no:cacheprovider", tests/test_sqlserver_live.py]
+    depends_on:
+      sqlserver:
+        condition: service_healthy
+    mem_limit: 3g
+    memswap_limit: 3g

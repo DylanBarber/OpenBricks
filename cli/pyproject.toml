@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=77", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "openbricks-cli"
+version = "0.4.0b1"
+description = "Deploy and run OpenBricks data projects from Git and CI"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+dependencies = ["httpx>=0.28,<1", "PyYAML>=6,<7"]
+
+[project.scripts]
+openbricks = "openbricks_cli.main:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["openbricks_cli*"]

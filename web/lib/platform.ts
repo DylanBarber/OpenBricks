@@ -1,5 +1,10 @@
 import type { Notebook, ParameterDefinition, QueryResult } from "./api";
 export type WorkflowTask = {
+  resource_options?: {
+    mode?: "interactive" | "job";
+    memory_mb?: number;
+    priority?: number;
+  };
   key: string;
   notebook_id?: string;
   release_id?: string;
@@ -56,7 +61,15 @@ export type SavedQuery = {
   id: string;
   name: string;
   project_id: string;
-  engine: "spark" | "sqlserver";
+  engine: "spark" | "sqlserver" | "duckdb";
+  payload?: {
+    sources?: {
+      name: string;
+      path: string;
+      format?: string;
+      connection_id?: string;
+    }[];
+  };
   sql: string;
   connection_id?: string;
   cluster_id?: string;

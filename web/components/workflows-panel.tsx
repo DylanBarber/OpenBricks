@@ -34,6 +34,7 @@ import {
 } from "./ui";
 import { ScheduleForm } from "./schedules-panel";
 import { NotebookPicker } from "./platform-controls";
+import { ResourceRunFields } from "./resource-controls";
 import {
   ParameterDefinitions,
   ParameterValues,
@@ -738,6 +739,13 @@ export default function WorkflowsPanel({
                       />
                     </Field>
                   </div>
+                  <ResourceRunFields
+                    jobOnly
+                    value={task.resource_options || { mode: "job" }}
+                    onChange={(resource_options) =>
+                      taskUpdate({ resource_options })
+                    }
+                  />
                   <label className="checkbox-field">
                     <input
                       type="checkbox"

@@ -15,6 +15,7 @@ type Member = {
   username: string;
   role: string;
   global_admin?: boolean;
+  is_service_account?: boolean;
 };
 export default function ProjectsPanel({
   projects,
@@ -350,7 +351,14 @@ export default function ProjectsPanel({
                       >
                         {["viewer", "editor", "operator", "owner"].map(
                           (role) => (
-                            <option key={role}>{role}</option>
+                            <option
+                              key={role}
+                              disabled={
+                                role === "owner" && member.is_service_account
+                              }
+                            >
+                              {role}
+                            </option>
                           ),
                         )}
                       </select>
@@ -410,7 +418,16 @@ export default function ProjectsPanel({
                   onChange={(event) => setNewRole(event.target.value)}
                 >
                   {["viewer", "editor", "operator", "owner"].map((role) => (
-                    <option key={role}>{role}</option>
+                    <option
+                      key={role}
+                      disabled={
+                        role === "owner" &&
+                        available.find((account) => account.id === newUser)
+                          ?.is_service_account
+                      }
+                    >
+                      {role}
+                    </option>
                   ))}
                 </select>
               </Field>

@@ -1,7 +1,7 @@
 name: openbricks
 services:
   openbricks:
-    image: ${OPENBRICKS_RUNTIME_IMAGE:-ghcr.io/dylanbarber/openbricks:0.3.0-beta.1}
+    image: ${OPENBRICKS_RUNTIME_IMAGE:-ghcr.io/dylanbarber/openbricks:0.4.0-beta.1}
     ports:
       - "${OPENBRICKS_BIND_ADDRESS:-0.0.0.0}:${OPENBRICKS_PORT:-3000}:3000"
     environment:
@@ -40,7 +40,7 @@ services:
         condition: service_healthy
 
   compute:
-    image: ${OPENBRICKS_COMPUTE_IMAGE:-ghcr.io/dylanbarber/openbricks-compute:0.3.0-beta.1}
+    image: ${OPENBRICKS_COMPUTE_IMAGE:-ghcr.io/dylanbarber/openbricks-compute:0.4.0-beta.1}
     environment:
       DATA_DIR: /data
       OPENBRICKS_COMPUTE_TOKEN: ${OPENBRICKS_COMPUTE_TOKEN:?Set the compute authentication token in .env}

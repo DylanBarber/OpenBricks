@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.4.0-beta.1 — 2026-11-05
+
+- Independent notebook/user worker processes, fresh job sessions, memory and concurrency budgets, project priorities, and session controls.
+- Git authoring with branches, file edits/diffs, notebook export, commits/pushes, pull requests, and version-checked import conflict review.
+- Captured-source date backfills, durable missed-schedule recovery, file/Delta/workflow event triggers, and paged automation history.
+- Declarative Git project bundles, reviewed deployment plans, captured promotion, CLI wheel, and scoped expiring service-account tokens.
+- SQL Server Change Tracking synchronization into owned Delta sinks, schema and checkpoint safety checks, and real SQL Server ODBC/JDBC/Delta integration tests.
+- Encrypted scheduled S3 backups, selected object/catalog exports, isolated restore drills, bounded remote recovery, and additive recovery plans.
+- DuckDB CSV/JSON/Parquet queries and saved source bindings without Spark startup.
+
+The default Docker ceilings remain 1 GB management and 4 GB compute. Workers use a process-tree memory guard within the compute container; they share the host account/filesystem. Local Hive-backed Spark workers use a single-owner lease. Change Tracking and external recovery require the setup described in the focused guides. See [release notes](docs/releases/0.4.0-beta.1.md).
+
 ## 0.3.0-beta.1 — 2026-11-05
 
 Pre-release source changes. Published images and release artifacts are outputs of the release workflow; check the actual release before relying on registry availability.

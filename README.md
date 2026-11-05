@@ -4,7 +4,7 @@
 
 **An open home for your data work.**
 
-**Beta: 0.3.0-beta.1.** Build from source with the quickstart below, or use the pinned Docker images and deployment bundle from a [published release](https://github.com/DylanBarber/OpenBricks/releases). See [container installation and releases](docs/RELEASING.md).
+**Beta: 0.4.0-beta.1.** Build from source with the quickstart below, or use the pinned Docker images and deployment bundle from a [published release](https://github.com/DylanBarber/OpenBricks/releases). See [container installation and releases](docs/RELEASING.md).
 
 A self-hosted notebook workspace for Python, Spark SQL, and scheduled data pipelines. OpenBricks brings notebooks, Git imports, reusable Python packages, object storage, and compute management into one browser UI.
 
@@ -70,6 +70,18 @@ The screenshot shows a real Spark SQL result and chart from a disposable workspa
 | Compute and catalog | Manage separate local/remote execution targets and optionally use Unity Catalog OSS shared metadata |
 | Projects and appearance | Assign viewer/operator/editor/owner roles and selected notebook connections; use System, Light, or Dark themes |
 | Operations | Inspect resources, manage retention and local backups/restore, and configure encrypted webhook/SMTP alert destinations |
+
+### New in 0.4
+
+- **Independent workers:** notebook/user sessions, fresh job workers, queue priorities, project budgets, and visible memory usage under the existing Docker limits.
+- **Git authoring:** edit repository files, review diffs, create branches, export notebooks, commit/push, and open GitHub pull requests. Imports stop for review when workspace cell sources have changed.
+- **Repeatable automation:** date-range backfills, bounded missed-schedule recovery, file-arrival triggers, Delta commit triggers, and upstream workflow completion triggers.
+- **Projects as code:** validate, plan, deploy, and promote Git bundles with the [CLI and expiring service-account tokens](docs/GIT_AND_DEPLOYMENTS.md).
+- **SQL Server synchronization:** Change Tracking reads inserts, updates, and deletes into a dedicated Delta sink, with schema/checkpoint validation and a real-server test harness.
+- **Backup policies:** encrypted scheduled S3 archives, optional selected object/catalog exports, isolated restore drills, and explicit recovery plans.
+- **DuckDB SQL:** query CSV, JSON, and Parquet files without starting Spark.
+
+See the [automation guide](docs/AUTOMATION.md), [data guide](docs/DATA_WORKSPACE.md), and [backup guide](docs/OPERATIONS.md) for examples and limits.
 
 ## Quick start
 
@@ -161,7 +173,7 @@ ORDER BY id
 
 Python cells expose `spark`, `sc`, `display`, `blob`, `dbutils.fs`, `dbutils.widgets`, `params`, `connections`, `catalog`, and the `data` helpers. A Python cell beginning with `%sql` also runs as SQL. Import Jupyter `.ipynb`, Databricks source `.py`, or `.sql` notebooks, and download edited notebooks as `.ipynb`.
 
-Individual cell runs retain that notebook's Python variables while its compute interpreter remains active. **Run all** starts a fresh Python namespace. Spark temporary views share the compute service's Spark session, so choose distinct names across projects. See [memory and sessions](#memory-and-session-behavior) for idle shutdown and resets.
+Individual cell runs retain Python variables in an interactive worker keyed by project, user, notebook, and package environment. **Run all** resets that notebook's Python namespace. Each worker owns its Spark session and temporary views. Persistent tables remain shared through the configured warehouse/catalog. See [memory and sessions](#memory-and-session-behavior) for eviction and resource limits.
 
 ## Editor, parameters, and revisions
 
@@ -320,7 +332,7 @@ Schedules continue with the browser closed while management and compute are avai
 
 ## Connect your data
 
-**Data workspace** combines a SQL editor, project-scoped saved queries/history, metadata browsing, row previews, and simple charts. Spark and SQL Server operations are queued on the selected compute. It also provides quality checks/reports, recorded lineage, Delta history/time travel/maintenance, and key-based incremental SQL Server ingestion. See [the data guide](docs/DATA_WORKSPACE.md) for exact helpers and limits. Previews are bounded, lineage is not a universal interception layer, and watermark ingestion is not CDC.
+**Data workspace** combines a SQL editor, project-scoped saved queries/history, metadata browsing, row previews, and simple charts. Choose Spark, SQL Server, or DuckDB on the selected compute. It also provides quality checks/reports, recorded lineage, Delta history/time travel/maintenance, and SQL Server-to-Delta synchronization. Change Tracking mode includes deletions and detects incompatible schemas or expired checkpoints; watermark mode retains its simpler greater-than behavior. See [the data guide](docs/DATA_WORKSPACE.md) for setup and limits.
 
 ### Microsoft SQL Server
 
@@ -468,7 +480,11 @@ Remote catalog/S3 endpoints need independently reachable addresses too. See [DEP
 
 Management and compute default to **1 GB** and **4 GB** limits, with no extra swap. These are ceilings, not memory reserved at startup. Spark's heap is only part of compute memory: Python, native JVM memory, libraries, and the API share that allowance.
 
-Compute releases its Spark/Python interpreter after **15 minutes with no active or queued work**. The next run starts fresh. Notebook definitions, installed wheels, files, and persistent tables survive; Python variables and temporary views do not.
+Interactive workers retain their state until stopped, evicted for capacity, or idle for **15 minutes**. Job workers exit after their run. Notebook definitions, installed wheels, files, and persistent tables survive; Python variables and temporary views do not survive worker eviction.
+
+Under **Compute clusters → Worker sessions**, inspect sessions and edit the compute policy. Defaults admit one active run, up to eight retained sessions, a 3,072 MB worker pool, and 2,048 MB per worker. Increase concurrency only when the host and workload fit. Per-project concurrency/memory budgets and priorities control admission; they do not reserve RAM. A process-tree memory monitor terminates an over-budget worker, and Docker enforces the aggregate 4 GB ceiling. Monitor sampling can briefly overshoot a worker budget. These trusted workers share the compute account and filesystem; they are separate processes, not separate security containers.
+
+The local Hive metastore permits one Spark owner at a time. Spark work waits for that lease, and an idle previous owner can be released. Python-only, DuckDB, and SQL Server workers can run concurrently when budgets permit.
 
 | Setting | Default | Purpose |
 | --- | --- | --- |
@@ -479,7 +495,7 @@ Compute releases its Spark/Python interpreter after **15 minutes with no active 
 | `OPENBRICKS_IDLE_TIMEOUT_SECONDS` | `900` | Idle shutdown; `0` disables it |
 | `OPENBRICKS_RUN_TIMEOUT` | `3600` | Maximum run seconds |
 
-Cancellation or timeout resets the affected interpreter and its notebook sessions. Management restarts reconnect to known remote run IDs; compute restarts lose in-memory sessions and fail unfinished work. Output previews are bounded; persist large results to storage.
+Cancellation, timeout, or memory termination stops the affected worker. Management restarts reconnect to known remote run IDs; compute restarts lose in-memory sessions and fail unfinished work. Output previews are bounded; persist large results to storage.
 
 Docker Desktop/WSL host-memory limits and cache reclamation are separate settings. The [host memory guide](DEPLOYMENT.md#docker-desktop-and-wsl-host-memory) includes an optional WSL example.
 
@@ -503,7 +519,7 @@ docker save openbricks:local openbricks-compute:local -o openbricks-images.tar
 docker load -i openbricks-images.tar
 ~~~
 
-Images contain runtimes, not data volumes. Transfer Compose/configuration files and backups separately. Administrators can create/download local workspace archives through **Operations**, optionally encrypted with a passphrase. Restore replaces local content and requires management/local compute to reload. External S3/SeaweedFS data, catalog databases, remote compute data, server environment, and images require separate backups. The default restore upload allowance is `OPENBRICKS_MAX_UPLOAD_MB=100`; larger archives require matching API/proxy configuration. Follow [Operations](docs/OPERATIONS.md) before relying on this recovery path.
+Images contain runtimes, not data volumes. Transfer Compose/configuration files and backups separately. Administrators can create/download local archives through **Operations**, or schedule mandatory-encrypted off-host archives under **Backup & recovery**. Policies can include selected S3 prefixes and Unity Catalog metadata, then verify the archive by booting a disposable restored workspace. Restore replaces local content and requires management/local compute to reload. Selected external objects/catalog metadata are recovered separately through an explicit plan. External databases, unselected storage, remote compute volumes, server configuration, and images still need separate backups. Direct S3 recovery avoids the UI's default 100 MB upload allowance. Follow [Operations](docs/OPERATIONS.md) for recovery steps.
 
 ## Operations and notifications
 
@@ -522,9 +538,9 @@ Current boundaries include:
 - Project-scoped access and notebook credential selection, rather than per-notebook ACL administration, enterprise SSO, or isolation between untrusted notebook authors.
 - No automatic infrastructure provisioning, Spark autoscaling, or general Databricks API compatibility.
 - Python and Spark SQL execution; Scala and R kernels are not included.
-- Git import creates workspace copies; there is no UI commit/push workflow.
+- Git imports create workspace copies; export changes through Git tools before committing them.
 - Wheel synchronization transfers packages, not every local file.
-- SQL Server has connector tests; live-server validation is still needed.
+- SQL Server Change Tracking requires source setup and a dedicated sink; it does not consume SQL Server CDC log tables.
 
 See [SECURITY.md](SECURITY.md) for security and vulnerability reporting, and [VERIFICATION.md](VERIFICATION.md) for tested flows and limits.
 

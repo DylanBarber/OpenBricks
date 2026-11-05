@@ -48,10 +48,12 @@ WORKDIR /app/backend
 COPY backend/requirements.txt ./requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 COPY --chown=10001:10001 backend/ ./
+COPY --chown=10001:10001 cli/ /app/cli/
+RUN pip install --no-cache-dir --no-deps --no-build-isolation /app/cli
 COPY --chown=10001:10001 docker/ /app/docker/
 COPY --from=spark-jars /opt/jars/ /opt/openbricks/jars/
 ARG OPENBRICKS_BUILD_ID=development
-ARG OPENBRICKS_VERSION=0.3.0-beta.1
+ARG OPENBRICKS_VERSION=0.4.0-beta.1
 ENV OPENBRICKS_BUILD_ID=${OPENBRICKS_BUILD_ID} \
     OPENBRICKS_VERSION=${OPENBRICKS_VERSION}
 LABEL org.opencontainers.image.version="${OPENBRICKS_VERSION}" \

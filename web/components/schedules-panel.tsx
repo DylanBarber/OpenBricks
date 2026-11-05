@@ -25,6 +25,10 @@ import {
 import type { Workflow } from "@/lib/platform";
 import { ParameterValues } from "./parameter-fields";
 import {
+  ResourceRunFields,
+  type ResourceRunOptions,
+} from "./resource-controls";
+import {
   Empty,
   Field,
   Modal,
@@ -72,6 +76,12 @@ export function ScheduleForm({
   onSave: () => void;
   onClose: () => void;
 }) {
+  const [resourceOptions, setResourceOptions] = useState<ResourceRunOptions>(
+    job?.resource_options || { mode: "job" },
+  );
+  const [catchupPolicy, setCatchupPolicy] = useState(
+    job?.catchup_policy || "skip",
+  );
   const [parameters, setParameters] = useState<Record<string, unknown>>(
     job?.parameters || {},
   );
@@ -221,6 +231,11 @@ export function ScheduleForm({
           timezone: form.get("timezone"),
           cluster_id: form.get("cluster_id") || null,
           enabled: job?.enabled ?? true,
+          catchup_policy: catchupPolicy,
+          catchup_window_hours: Number(form.get("catchup_window_hours") || 24),
+          catchup_max_runs: Number(form.get("catchup_max_runs") || 24),
+          schedule_date_parameter: form.get("schedule_date_parameter") || null,
+          resource_options: { ...resourceOptions, mode: "job" },
         }),
       );
       onSave();
@@ -524,6 +539,76 @@ export function ScheduleForm({
             </div>
           </div>
         )}
+        <details className="card inline-card">
+          <summary>Resources and missed schedules</summary>
+          {!workflow && !job?.workflow_id ? (
+            <ResourceRunFields
+              value={resourceOptions}
+              onChange={setResourceOptions}
+              jobOnly
+            />
+          ) : (
+            <p className="form-note">
+              Workflow steps use their own worker budgets.
+            </p>
+          )}
+          <Field label="When schedules were missed">
+            <select
+              value={catchupPolicy}
+              onChange={(event) =>
+                setCatchupPolicy(
+                  event.target.value as "skip" | "latest" | "all",
+                )
+              }
+            >
+              <option value="skip">Skip missed runs</option>
+              <option value="latest">Run the latest missed occurrence</option>
+              <option value="all">
+                Catch up every occurrence within the window
+              </option>
+            </select>
+          </Field>
+          <div className="form-grid">
+            <Field label="Catch-up window (hours)">
+              <input
+                name="catchup_window_hours"
+                type="number"
+                min={1}
+                max={168}
+                defaultValue={job?.catchup_window_hours || 24}
+              />
+            </Field>
+            <Field label="Catch-up batch size">
+              <input
+                name="catchup_max_runs"
+                type="number"
+                min={1}
+                max={366}
+                defaultValue={job?.catchup_max_runs || 24}
+              />
+            </Field>
+          </div>
+          <Field
+            label="Occurrence date parameter"
+            hint="Optional date/string parameter filled with each scheduled date in this job's time zone."
+          >
+            <select
+              name="schedule_date_parameter"
+              defaultValue={job?.schedule_date_parameter || ""}
+            >
+              <option value="">Keep saved parameter values</option>
+              {definitions
+                .filter(
+                  (item) => item.type === "date" || item.type === "string",
+                )
+                .map((item) => (
+                  <option key={item.name} value={item.name}>
+                    {item.name}
+                  </option>
+                ))}
+            </select>
+          </Field>
+        </details>
         <Field
           label="Time zone"
           hint="Schedules follow this IANA time zone, including daylight saving changes."

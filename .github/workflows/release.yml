@@ -75,6 +75,13 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v6
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Build portable CLI wheel
+        run: |
+          python -m pip install build
+          python -m build --wheel --outdir cli-dist cli
       - uses: actions/download-artifact@v4
         with:
           pattern: docker-*
@@ -87,5 +94,5 @@ jobs:
           release_flags=()
           if [[ "$GITHUB_REF_NAME" == *-* ]]; then release_flags+=(--prerelease); fi
           bundle="openbricks-${GITHUB_REF_NAME#v}-deployment.tar.gz"
-          tar -czf "$bundle" compose.release.yaml compose.compute.yaml .env.example docker/catalog DEPLOYMENT.md SECURITY.md LICENSE docs
-          gh release create "$GITHUB_REF_NAME" "$bundle" images/*.tar.gz images/*.sha256 compose.release.yaml compose.compute.yaml .env.example --verify-tag --title "OpenBricks ${GITHUB_REF_NAME#v}" --notes-file "docs/releases/${GITHUB_REF_NAME#v}.md" "${release_flags[@]}"
+          tar -czf "$bundle" compose.release.yaml compose.compute.yaml compose.sql-tests.yaml .env.example docker/catalog DEPLOYMENT.md SECURITY.md LICENSE docs examples
+          gh release create "$GITHUB_REF_NAME" "$bundle" images/*.tar.gz images/*.sha256 cli-dist/*.whl compose.release.yaml compose.compute.yaml .env.example --verify-tag --title "OpenBricks ${GITHUB_REF_NAME#v}" --notes-file "docs/releases/${GITHUB_REF_NAME#v}.md" "${release_flags[@]}"

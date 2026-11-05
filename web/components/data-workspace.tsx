@@ -39,6 +39,7 @@ type Check = {
   max_age_seconds?: number;
 };
 type Ingestion = {
+  mode?: "watermark" | "change_tracking";
   id: string;
   name: string;
   project_id: string;
@@ -186,7 +187,10 @@ export default function DataWorkspace({
     canRun = role !== "viewer",
     canManage = role === "owner";
   const [tab, setTab] = useState("sql"),
-    [engine, setEngine] = useState<"spark" | "sqlserver">("spark"),
+    [engine, setEngine] = useState<"spark" | "sqlserver" | "duckdb">("spark"),
+    [duckSources, setDuckSources] = useState<
+      { name: string; path: string; format?: string; connection_id?: string }[]
+    >([]),
     [connectionId, setConnectionId] = useState(""),
     [clusterId, setClusterId] = useState(""),
     [sql, setSql] = useState("SELECT * FROM range(10)"),
@@ -234,6 +238,7 @@ export default function DataWorkspace({
     setHistoryOffset(0);
     setLineageOffset(0);
     setIngestionOffset(0);
+    setDuckSources([]);
   }, [projectId]);
   const computeIds = clusters.map((cluster) => cluster.id).join(",");
   useEffect(() => {
@@ -353,7 +358,10 @@ export default function DataWorkspace({
             schema: schema || null,
             table: table || null,
             limit: 100,
-            payload,
+            payload:
+              engine === "duckdb"
+                ? { ...payload, sources: duckSources }
+                : payload,
             ...overrides,
           }),
         ),
@@ -374,6 +382,7 @@ export default function DataWorkspace({
             connection_id: connectionId || null,
             cluster_id: clusterId || null,
             params: JSON.parse(params),
+            payload: engine === "duckdb" ? { sources: duckSources } : {},
           }),
         ),
       );
@@ -388,6 +397,7 @@ export default function DataWorkspace({
     setClusterId(query.cluster_id || "");
     setParams(JSON.stringify(query.params || [], null, 2));
     setQueryName(query.name);
+    setDuckSources(query.payload?.sources || []);
     setTab("sql");
   }
   function dataset() {
@@ -478,12 +488,15 @@ export default function DataWorkspace({
                 <select
                   value={engine}
                   onChange={(event) => {
-                    setEngine(event.target.value as "spark" | "sqlserver");
+                    setEngine(
+                      event.target.value as "spark" | "sqlserver" | "duckdb",
+                    );
                     setExecution(null);
                   }}
                 >
                   <option value="spark">Spark SQL</option>
                   <option value="sqlserver">Microsoft SQL Server</option>
+                  <option value="duckdb">DuckDB · quick file queries</option>
                 </select>
               </Field>
 
@@ -529,6 +542,124 @@ export default function DataWorkspace({
           </section>
           {tab === "sql" ? (
             <section className="card sql-workspace">
+              {engine === "duckdb" ? (
+                <div className="modal-form">
+                  <div className="card-heading">
+                    <h3>Files for this query</h3>
+                    <button
+                      className="button compact"
+                      onClick={() =>
+                        setDuckSources([
+                          ...duckSources,
+                          {
+                            name: `dataset_${duckSources.length + 1}`,
+                            path: "",
+                            format: "parquet",
+                          },
+                        ])
+                      }
+                      disabled={!canRun || duckSources.length >= 32}
+                    >
+                      <Plus size={13} />
+                      Add file source
+                    </button>
+                  </div>
+                  <p className="form-note">
+                    Query CSV, Parquet, or JSON files as named tables. This
+                    engine runs without starting Spark.
+                  </p>
+                  {duckSources.map((source, index) => (
+                    <div className="form-grid" key={index}>
+                      <Field label="Table alias">
+                        <input
+                          value={source.name}
+                          onChange={(event) =>
+                            setDuckSources(
+                              duckSources.map((item, position) =>
+                                position === index
+                                  ? { ...item, name: event.target.value }
+                                  : item,
+                              ),
+                            )
+                          }
+                        />
+                      </Field>
+                      <Field label="File path">
+                        <input
+                          value={source.path}
+                          placeholder="blob://workspace/orders.parquet"
+                          onChange={(event) =>
+                            setDuckSources(
+                              duckSources.map((item, position) =>
+                                position === index
+                                  ? { ...item, path: event.target.value }
+                                  : item,
+                              ),
+                            )
+                          }
+                        />
+                      </Field>
+                      <Field label="File format">
+                        <select
+                          value={source.format || "parquet"}
+                          onChange={(event) =>
+                            setDuckSources(
+                              duckSources.map((item, position) =>
+                                position === index
+                                  ? { ...item, format: event.target.value }
+                                  : item,
+                              ),
+                            )
+                          }
+                        >
+                          <option value="parquet">Parquet</option>
+                          <option value="csv">CSV</option>
+                          <option value="json">JSON</option>
+                        </select>
+                      </Field>
+                      <Field label="Remote storage connection">
+                        <select
+                          value={source.connection_id || ""}
+                          onChange={(event) =>
+                            setDuckSources(
+                              duckSources.map((item, position) =>
+                                position === index
+                                  ? {
+                                      ...item,
+                                      connection_id:
+                                        event.target.value || undefined,
+                                    }
+                                  : item,
+                              ),
+                            )
+                          }
+                        >
+                          <option value="">Local file</option>
+                          {connections
+                            .filter((item) => item.type === "s3")
+                            .map((item) => (
+                              <option key={item.id} value={item.id}>
+                                {item.name}
+                              </option>
+                            ))}
+                        </select>
+                      </Field>
+                      <button
+                        className="button compact"
+                        onClick={() =>
+                          setDuckSources(
+                            duckSources.filter(
+                              (_, position) => position !== index,
+                            ),
+                          )
+                        }
+                      >
+                        Remove source
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              ) : null}
               <div className="card-heading">
                 <h3>{selectedQuery?.name || "Untitled query"}</h3>
                 <div className="row-actions">
@@ -985,6 +1116,7 @@ export default function DataWorkspace({
                     setIngestion({
                       id: "",
                       name: "New ingestion",
+                      mode: "change_tracking",
                       project_id: projectId,
                       connection_id: sqlConnections[0]?.id || "",
                       source: { schema: "dbo", table: "" },
@@ -1016,8 +1148,16 @@ export default function DataWorkspace({
                     </small>
                   </button>
                   <span className="muted">
-                    Watermark{" "}
-                    {JSON.stringify(item.watermark_value ?? "Not started")}
+                    {item.mode === "change_tracking"
+                      ? "Change Tracking"
+                      : "Watermark"}{" "}
+                    {JSON.stringify(
+                      item.mode === "change_tracking" &&
+                        item.watermark_value &&
+                        typeof item.watermark_value === "object"
+                        ? (item.watermark_value as { version?: number }).version
+                        : (item.watermark_value ?? "Not started"),
+                    )}
                   </span>
                   <button
                     className="button compact"
@@ -1071,9 +1211,10 @@ export default function DataWorkspace({
                 onPage={setIngestionOffset}
               />
               <p className="form-note padded">
-                The source watermark uses a strict greater-than comparison. Late
-                rows at or below the saved watermark and source deletions are
-                not captured. Keys must be non-null and unique.
+                Change Tracking captures inserts, updates, and deletions by
+                primary key. Watermark mode reads only rows above the saved
+                watermark and does not capture deletions. Both modes use a
+                dedicated Delta sink and advance checkpoints after success.
               </p>
             </section>
           ) : null}
@@ -1461,58 +1602,89 @@ export default function DataWorkspace({
                     onChange={(event) => setKeyText(event.target.value)}
                   />
                 </Field>
-                <Field label="Watermark column">
-                  <input
-                    required
-                    value={ingestion.watermark.column}
-                    onChange={(event) =>
-                      setIngestion({
-                        ...ingestion,
-                        watermark: {
-                          ...ingestion.watermark,
-                          column: event.target.value,
-                        },
-                      })
-                    }
-                  />
-                </Field>
-                <Field label="Watermark type">
+                <Field
+                  label="Synchronization mode"
+                  hint="Change Tracking captures updates and deletions using a consistent source snapshot."
+                >
                   <select
-                    value={ingestion.watermark.type}
+                    value={ingestion.mode || "watermark"}
                     onChange={(event) =>
                       setIngestion({
                         ...ingestion,
-                        watermark: {
-                          ...ingestion.watermark,
-                          type: event.target.value,
+                        mode: event.target.value as
+                          "watermark" | "change_tracking",
+                        jdbc: {
+                          fetch_size: ingestion.jdbc?.fetch_size || 4096,
                         },
                       })
                     }
                   >
-                    {["timestamp", "date", "number", "string"].map((type) => (
-                      <option key={type}>{type}</option>
-                    ))}
+                    <option value="change_tracking">
+                      Change Tracking · insert, update, delete
+                    </option>
+                    <option value="watermark">
+                      Watermark · rows after a timestamp or value
+                    </option>
                   </select>
                 </Field>
-                <Field label="Initial watermark (optional)">
-                  <input
-                    value={String(ingestion.watermark.initial ?? "")}
-                    onChange={(event) =>
-                      setIngestion({
-                        ...ingestion,
-                        watermark: {
-                          ...ingestion.watermark,
-                          initial:
-                            event.target.value === ""
-                              ? undefined
-                              : ingestion.watermark.type === "number"
-                                ? Number(event.target.value)
-                                : event.target.value,
-                        },
-                      })
-                    }
-                  />
-                </Field>
+                {(ingestion.mode || "watermark") === "watermark" ? (
+                  <>
+                    <Field label="Watermark column">
+                      <input
+                        required
+                        value={ingestion.watermark.column}
+                        onChange={(event) =>
+                          setIngestion({
+                            ...ingestion,
+                            watermark: {
+                              ...ingestion.watermark,
+                              column: event.target.value,
+                            },
+                          })
+                        }
+                      />
+                    </Field>
+                    <Field label="Watermark type">
+                      <select
+                        value={ingestion.watermark.type}
+                        onChange={(event) =>
+                          setIngestion({
+                            ...ingestion,
+                            watermark: {
+                              ...ingestion.watermark,
+                              type: event.target.value,
+                            },
+                          })
+                        }
+                      >
+                        {["timestamp", "date", "number", "string"].map(
+                          (type) => (
+                            <option key={type}>{type}</option>
+                          ),
+                        )}
+                      </select>
+                    </Field>
+                    <Field label="Initial watermark (optional)">
+                      <input
+                        value={String(ingestion.watermark.initial ?? "")}
+                        onChange={(event) =>
+                          setIngestion({
+                            ...ingestion,
+                            watermark: {
+                              ...ingestion.watermark,
+                              initial:
+                                event.target.value === ""
+                                  ? undefined
+                                  : ingestion.watermark.type === "number"
+                                    ? Number(event.target.value)
+                                    : event.target.value,
+                            },
+                          })
+                        }
+                      />
+                    </Field>
+                  </>
+                ) : null}
                 <Field label="Fetch size">
                   <input
                     type="number"
@@ -1548,44 +1720,46 @@ export default function DataWorkspace({
                   </select>
                 </Field>
               </div>
-              <details>
-                <summary>Parallel JDBC reads (optional)</summary>
-                <div className="form-grid">
-                  {[
-                    ["partition_column", "Partition column"],
-                    ["lower_bound", "Lower bound"],
-                    ["upper_bound", "Upper bound"],
-                    ["num_partitions", "Partitions"],
-                  ].map(([key, label]) => (
-                    <Field key={key} label={label}>
-                      <input
-                        value={String(
-                          (
-                            ingestion.jdbc as
-                              Record<string, unknown> | undefined
-                          )?.[key] ?? "",
-                        )}
-                        onChange={(event) =>
-                          setIngestion({
-                            ...ingestion,
-                            jdbc: {
-                              ...ingestion.jdbc,
-                              [key]:
-                                key === "partition_column"
-                                  ? event.target.value
-                                  : Number(event.target.value),
-                            },
-                          })
-                        }
-                      />
-                    </Field>
-                  ))}
-                </div>
-              </details>
+              {(ingestion.mode || "watermark") === "watermark" ? (
+                <details>
+                  <summary>Parallel JDBC reads (optional)</summary>
+                  <div className="form-grid">
+                    {[
+                      ["partition_column", "Partition column"],
+                      ["lower_bound", "Lower bound"],
+                      ["upper_bound", "Upper bound"],
+                      ["num_partitions", "Partitions"],
+                    ].map(([key, label]) => (
+                      <Field key={key} label={label}>
+                        <input
+                          value={String(
+                            (
+                              ingestion.jdbc as
+                                Record<string, unknown> | undefined
+                            )?.[key] ?? "",
+                          )}
+                          onChange={(event) =>
+                            setIngestion({
+                              ...ingestion,
+                              jdbc: {
+                                ...ingestion.jdbc,
+                                [key]:
+                                  key === "partition_column"
+                                    ? event.target.value
+                                    : Number(event.target.value),
+                              },
+                            })
+                          }
+                        />
+                      </Field>
+                    ))}
+                  </div>
+                </details>
+              ) : null}
               <p className="form-note">
-                A successful merge advances the checkpoint. Failed runs preserve
-                the previous watermark; source deletions and late arrivals below
-                that watermark are not replicated.
+                {ingestion.mode === "change_tracking"
+                  ? "Enable Change Tracking and snapshot isolation on the source. Merge keys must match its primary key. Use a new, dedicated Delta sink. Schema changes or expired checkpoints stop the ingestion for review; successful runs capture inserts, updates, and deletions."
+                  : "Successful runs advance the watermark. This mode does not replicate source deletions or late arrivals below that watermark."}
               </p>
               {error ? <div className="inline-error">{error}</div> : null}
             </fieldset>

@@ -47,6 +47,10 @@ import {
 } from "./parameter-fields";
 
 import { RunActivity } from "./run-activity";
+import {
+  ResourceRunFields,
+  type ResourceRunOptions,
+} from "./resource-controls";
 
 const CodeEditor = dynamic(() => import("./code-editor"), { ssr: false });
 
@@ -152,6 +156,9 @@ export function NotebookEditor({
   const [parameters, setParameters] = useState<Record<string, unknown>>({});
 
   const [runClusterId, setRunClusterId] = useState("");
+  const [resourceOptions, setResourceOptions] = useState<ResourceRunOptions>({
+    mode: "interactive",
+  });
   const [environmentId, setEnvironmentId] = useState("");
 
   const [environments, setEnvironments] = useState<
@@ -347,6 +354,7 @@ export function NotebookEditor({
           parameters,
           ...(runClusterId ? { cluster_id: runClusterId } : {}),
           environment_id: environmentId || null,
+          resource_options: resourceOptions,
         }),
       );
       setRun(started);
@@ -943,6 +951,10 @@ export function NotebookEditor({
                   ))}
               </select>
             </Field>
+            <ResourceRunFields
+              value={resourceOptions}
+              onChange={setResourceOptions}
+            />
             <Field label="Pinned package environment">
               <select
                 value={environmentId}

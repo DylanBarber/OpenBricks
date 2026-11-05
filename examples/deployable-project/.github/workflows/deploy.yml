@@ -1,0 +1,27 @@
+name: Deploy OpenBricks project
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: openbricks-production
+  cancel-in-progress: false
+jobs:
+  deploy:
+    runs-on: self-hosted
+    env:
+      OPENBRICKS_URL: ${{ secrets.OPENBRICKS_URL }}
+      OPENBRICKS_TOKEN: ${{ secrets.OPENBRICKS_TOKEN }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install the released client
+        run: python -m pip install https://github.com/DylanBarber/OpenBricks/releases/download/v0.4.0-beta.1/openbricks_cli-0.4.0b1-py3-none-any.whl
+      - name: Validate the production target
+        run: openbricks validate openbricks.yml --target prod
+      - name: Deploy the reviewed commit
+        run: openbricks deploy openbricks.yml --target prod

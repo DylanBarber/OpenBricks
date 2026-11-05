@@ -43,3 +43,45 @@ jobs:
         working-directory: web
         env:
           NEXT_TELEMETRY_DISABLED: '1'
+  sqlserver:
+    name: SQL Server integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v6
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: compute
+          load: true
+          tags: openbricks-compute:test
+          build-args: OPENBRICKS_BUILD_ID=${{ github.sha }}
+          cache-from: type=gha,scope=compute
+          cache-to: type=gha,mode=max,scope=compute-sql
+      - name: Configure disposable SQL Server credential
+        run: |
+          test_password="Sql$(openssl rand -hex 20)!"
+          echo "::add-mask::$test_password"
+          echo "OPENBRICKS_SQLSERVER_PASSWORD=$test_password" >> "$GITHUB_ENV"
+      - name: Real ODBC, JDBC, and change-tracking checks
+        run: docker compose -f compose.sql-tests.yaml up --abort-on-container-exit --exit-code-from tests --no-build
+      - name: Remove disposable SQL Server resources
+        if: always()
+        env:
+          OPENBRICKS_SQLSERVER_PASSWORD: cleanup-only-unused-password
+        run: docker compose -f compose.sql-tests.yaml down --volumes --remove-orphans
+  cli:
+    name: CLI package
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install ./cli build
+      - run: openbricks --version
+      - name: Pack the example project without a server
+        run: openbricks pack examples/deployable-project/openbricks.yml --output /tmp/openbricks-example.json
+      - run: python -m build --wheel cli

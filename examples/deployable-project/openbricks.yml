@@ -1,0 +1,40 @@
+format_version: 1
+name: hello-delivery
+targets:
+  dev:
+    project_id: default
+    variables:
+      run_date: "2026-11-05"
+  prod:
+    project_id: REPLACE_WITH_PRODUCTION_PROJECT_ID
+    variables:
+      run_date: "2026-11-05"
+environment:
+  wheels: []
+notebooks:
+  - key: prepare
+    path: notebooks/10_prepare.py
+    parameter_definitions:
+      - {name: run_date, type: date, required: true}
+  - key: report
+    path: notebooks/20_report.py
+    parameter_definitions:
+      - {name: run_date, type: date, required: true}
+workflows:
+  - key: daily
+    parameter_definitions:
+      - {name: run_date, type: date, default: "${vars.run_date}"}
+    tasks:
+      - key: prepare
+        notebook: prepare
+        resource_options: {memory_mb: 384, priority: 0}
+      - key: report
+        notebook: report
+        depends_on: [prepare]
+        resource_options: {memory_mb: 384, priority: 0}
+schedules:
+  - key: morning
+    workflow: daily
+    cron: "0 8 * * *"
+    timezone: UTC
+    enabled: false

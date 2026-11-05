@@ -90,6 +90,12 @@ const DataWorkspace = dynamic(() => import("./data-workspace"));
 const ProjectsPanel = dynamic(() => import("./projects-panel"));
 const OperationsPanel = dynamic(() => import("./operations-panel"));
 const ReleasesPanel = dynamic(() => import("./releases-panel"));
+const AutomationPanel = dynamic(() => import("./automation-panel"));
+const GitWorkspacePanel = dynamic(() => import("./git-workspace-panel"));
+const DeploymentsPanel = dynamic(() => import("./deployments-panel"));
+const ServiceAccountsPanel = dynamic(() => import("./service-accounts-panel"));
+const ResourceControls = dynamic(() => import("./resource-controls"));
+const BackupPoliciesPanel = dynamic(() => import("./backup-policies-panel"));
 import { ThemeToggle } from "./theme-toggle";
 import { WorkspaceBrowser } from "./workspace-browser";
 import { RunBrowser } from "./run-browser";
@@ -114,6 +120,10 @@ type View =
   | "data"
   | "projects"
   | "operations"
+  | "automation"
+  | "deployments"
+  | "serviceaccounts"
+  | "backups"
   | "releases";
 const viewNames: Record<View, string> = {
   workflows: "Workflows",
@@ -121,6 +131,10 @@ const viewNames: Record<View, string> = {
   projects: "Projects & access",
   operations: "Operations",
   releases: "Releases & environments",
+  automation: "Backfills & triggers",
+  deployments: "Project deployments",
+  serviceaccounts: "Service accounts",
+  backups: "Backup & recovery",
   home: "Overview",
   workspace: "Workspace",
   jobs: "Jobs & schedules",
@@ -141,6 +155,7 @@ const navigation = [
       { id: "workspace", label: "Notebooks", icon: BookOpen },
       { id: "workflows", label: "Workflows", icon: GitBranch },
       { id: "jobs", label: "Jobs & schedules", icon: CalendarClock },
+      { id: "automation", label: "Backfills & triggers", icon: RefreshCw },
       { id: "runs", label: "Run history", icon: Activity },
     ],
   },
@@ -150,6 +165,7 @@ const navigation = [
       { id: "data", label: "Data workspace", icon: Database },
       { id: "repositories", label: "Git repositories", icon: FolderGit2 },
       { id: "releases", label: "Releases", icon: GitBranch },
+      { id: "deployments", label: "Deployments", icon: Upload },
       { id: "packages", label: "Packages", icon: Box },
       { id: "connections", label: "Connections", icon: Database },
       { id: "catalog", label: "Data catalog", icon: Layers3 },
@@ -160,6 +176,8 @@ const navigation = [
     items: [
       { id: "projects", label: "Projects & access", icon: Users },
       { id: "operations", label: "Operations", icon: Settings2 },
+      { id: "backups", label: "Backup & recovery", icon: ShieldCheck },
+      { id: "serviceaccounts", label: "Service accounts", icon: LockKeyhole },
       { id: "storage", label: "Object storage", icon: Database },
       { id: "compute", label: "Compute clusters", icon: Cpu },
     ],
@@ -293,7 +311,7 @@ function Login({ onLogin }: { onLogin: (user: User) => void }) {
         <div className="login-footer">
           <BrickMark small />
           <span>An open home for your data work.</span>
-          <span>v0.3 beta</span>
+          <span>v0.4 beta</span>
         </div>
       </div>
     </div>
@@ -480,6 +498,13 @@ export function OpenBricks() {
   const [checking, setChecking] = useState(true);
   const [data, setData] = useState<Overview | null>(null);
   const [view, setView] = useState<View>("home");
+  const [selectedRepositoryId, setSelectedRepositoryId] = useState<
+    string | null
+  >(null);
+  const [importConflict, setImportConflict] = useState<{
+    repositoryId: string;
+    conflicts: { id: string; name: string; path: string; version: number }[];
+  } | null>(null);
   const [projects, setProjects] = useState<Project[]>([]);
   const [projectId, setProjectId] = useState("default");
   const [clusters, setClusters] = useState<Cluster[]>([]);
@@ -507,6 +532,10 @@ export function OpenBricks() {
   const objectUpload = useRef<HTMLInputElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
   const notifyError = useCallback((message: string) => setError(message), []);
+  useEffect(() => {
+    setSelectedRepositoryId(null);
+    setImportConflict(null);
+  }, [projectId]);
   const refresh = useCallback(async () => {
     try {
       const availableProjects = await api<Project[]>("/projects");
@@ -616,6 +645,47 @@ export function OpenBricks() {
     } finally {
       setBusy(false);
     }
+  }
+  async function importRepository(repositoryId: string, overwrite = false) {
+    await action(async () => {
+      try {
+        const imported = await api<Notebook[]>(
+          `/repositories/${repositoryId}/import`,
+          json("POST", {
+            overwrite,
+            expected_versions: overwrite
+              ? Object.fromEntries(
+                  (importConflict?.conflicts || []).map((item) => [
+                    item.id,
+                    item.version,
+                  ]),
+                )
+              : {},
+          }),
+        );
+        setImportConflict(null);
+        setToast(`${imported.length} notebooks imported.`);
+      } catch (failure) {
+        const details =
+          failure instanceof ApiError
+            ? (failure.details as {
+                conflicts?: {
+                  id: string;
+                  name: string;
+                  path: string;
+                  version: number;
+                }[];
+              })
+            : null;
+        if (
+          failure instanceof ApiError &&
+          failure.status === 409 &&
+          details?.conflicts
+        ) {
+          setImportConflict({ repositoryId, conflicts: details.conflicts });
+        } else throw failure;
+      }
+    });
   }
   const openNotebook = useCallback(async (id: string) => {
     try {
@@ -758,6 +828,17 @@ export function OpenBricks() {
       ? "owner"
       : projects.find((project) => project.id === projectId)?.role || "viewer";
   const canEditProject = ["editor", "owner"].includes(currentRole);
+  const projectConnections = connections.filter(
+    (connection) =>
+      projects
+        .find((project) => project.id === projectId)
+        ?.connection_ids?.includes(connection.id) ||
+      (
+        (connection as Connection & { project_ids?: string[] }).project_ids || [
+          "default",
+        ]
+      ).includes(projectId),
+  );
   const selectedRunRole =
     user?.role === "admin"
       ? "owner"
@@ -823,22 +904,28 @@ export function OpenBricks() {
           {navigation.map((group) => (
             <div className="nav-group" key={group.group}>
               <div className="nav-label">{group.group}</div>
-              {group.items.map((item) => (
-                <button
-                  key={item.id}
-                  className={`nav-item ${view === item.id ? "active" : ""}`}
-                  onClick={() => navigate(item.id as View)}
-                >
-                  <item.icon size={17} />
-                  <span>{item.label}</span>
-                  {item.id === "jobs" &&
-                  (data?.metrics?.jobs || data?.jobs.length) ? (
-                    <span className="nav-count">
-                      {data?.metrics?.jobs ?? data?.jobs.length}
-                    </span>
-                  ) : null}
-                </button>
-              ))}
+              {group.items
+                .filter(
+                  (item) =>
+                    !["serviceaccounts", "backups"].includes(item.id) ||
+                    user.role === "admin",
+                )
+                .map((item) => (
+                  <button
+                    key={item.id}
+                    className={`nav-item ${view === item.id ? "active" : ""}`}
+                    onClick={() => navigate(item.id as View)}
+                  >
+                    <item.icon size={17} />
+                    <span>{item.label}</span>
+                    {item.id === "jobs" &&
+                    (data?.metrics?.jobs || data?.jobs.length) ? (
+                      <span className="nav-count">
+                        {data?.metrics?.jobs ?? data?.jobs.length}
+                      </span>
+                    ) : null}
+                  </button>
+                ))}
             </div>
           ))}
         </nav>
@@ -1021,6 +1108,41 @@ export function OpenBricks() {
           />
         ) : (
           <main className="page-content">
+            {view === "automation" ? (
+              <AutomationPanel
+                key={projectId}
+                projectId={projectId}
+                role={currentRole}
+                onError={notifyError}
+                onRun={openRun}
+              />
+            ) : null}
+            {view === "deployments" ? (
+              <DeploymentsPanel
+                key={projectId}
+                projectId={projectId}
+                role={currentRole}
+                onChanged={refresh}
+                onError={notifyError}
+              />
+            ) : null}
+            {view === "serviceaccounts" && user.role === "admin" ? (
+              <ServiceAccountsPanel
+                key={projectId}
+                projects={projects}
+                projectId={projectId}
+                isAdmin
+                onError={notifyError}
+              />
+            ) : null}
+            {view === "backups" && user.role === "admin" ? (
+              <BackupPoliciesPanel
+                key={projectId}
+                projectId={projectId}
+                admin
+                onError={notifyError}
+              />
+            ) : null}
             {view === "workflows" ? (
               <WorkflowsPanel
                 role={
@@ -1054,15 +1176,7 @@ export function OpenBricks() {
                     .find((project) => project.id === projectId)
                     ?.cluster_ids?.includes(cluster.id),
                 )}
-                connections={connections.filter(
-                  (connection) =>
-                    projects
-                      .find((project) => project.id === projectId)
-                      ?.connection_ids?.includes(connection.id) ||
-                    (
-                      connection as Connection & { project_ids?: string[] }
-                    ).project_ids?.includes(projectId),
-                )}
+                connections={projectConnections}
                 onError={notifyError}
               />
             ) : null}
@@ -1099,15 +1213,7 @@ export function OpenBricks() {
                 onRun={openRun}
                 projectId={projectId}
                 repositories={data.repositories}
-                connections={connections.filter(
-                  (connection) =>
-                    projects
-                      .find((project) => project.id === projectId)
-                      ?.connection_ids?.includes(connection.id) ||
-                    (
-                      connection as Connection & { project_ids?: string[] }
-                    ).project_ids?.includes(projectId),
-                )}
+                connections={projectConnections}
                 onError={notifyError}
               />
             ) : null}
@@ -1455,106 +1561,126 @@ export function OpenBricks() {
             ) : null}
             {view === "repositories" ? (
               <>
-                <SectionHead
-                  eyebrow="YOUR CODE, CONNECTED"
-                  title="Git repositories"
-                  description="Bring notebooks and Python projects into your local workspace."
-                  actions={
+                {selectedRepositoryId ? (
+                  <>
                     <button
-                      className="button primary"
-                      onClick={() => setModal("repository")}
+                      className="button"
+                      onClick={() => setSelectedRepositoryId(null)}
                     >
-                      <Plus size={15} />
-                      Clone repository
+                      Back to repositories
                     </button>
-                  }
-                />
-                <div className="repository-grid">
-                  {repositories.map((repo) => (
-                    <section className="card repository-card" key={repo.id}>
-                      <div className="repository-top">
-                        <span className="repo-icon">
-                          <FolderGit2 size={24} />
-                        </span>
-                        <span className="subtle-tag">Git repository</span>
-                      </div>
-                      <h2>{repo.name}</h2>
-                      <p className="repository-url">{repo.url}</p>
-                      <div className="repository-meta">
-                        <span>
-                          <GitBranch size={14} />
-                          {repo.branch}
-                        </span>
-                        <code>{repo.commit?.slice(0, 7) || "—"}</code>
-                      </div>
-                      <div className="repository-updated">
-                        Last synced {relative(repo.updated_at)}
-                      </div>
-                      <div className="repository-actions">
-                        <button
-                          className="button"
-                          disabled={busy}
-                          onClick={() =>
-                            void action(async () => {
-                              await api(
-                                `/repositories/${repo.id}/pull`,
-                                json("POST"),
-                              );
-                            }, "Repository updated.")
-                          }
-                        >
-                          <RefreshCw size={14} />
-                          Pull latest
-                        </button>
-                        <button
-                          className="button primary soft"
-                          disabled={busy}
-                          onClick={() =>
-                            void action(async () => {
-                              const imported = await api<Notebook[]>(
-                                `/repositories/${repo.id}/import`,
-                                json("POST"),
-                              );
-                              setToast(
-                                `${imported.length} notebooks imported.`,
-                              );
-                            })
-                          }
-                        >
-                          <ArrowDownToLine size={14} />
-                          Import notebooks
-                        </button>
-                      </div>
-                    </section>
-                  ))}
-                </div>
-                {!repositories.length ? (
-                  <section className="card">
-                    <Empty
-                      icon={<FolderGit2 size={30} />}
-                      title="Great work starts with a commit"
-                      action={
+                    <GitWorkspacePanel
+                      key={selectedRepositoryId}
+                      repositoryId={selectedRepositoryId}
+                      projectId={projectId}
+                      role={currentRole}
+                      isAdmin={user.role === "admin"}
+                      onChanged={refresh}
+                      onError={notifyError}
+                    />
+                  </>
+                ) : (
+                  <>
+                    <SectionHead
+                      eyebrow="YOUR CODE, CONNECTED"
+                      title="Git repositories"
+                      description="Bring notebooks and Python projects into your local workspace."
+                      actions={
                         <button
                           className="button primary"
                           onClick={() => setModal("repository")}
                         >
                           <Plus size={15} />
-                          Connect a repository
+                          Clone repository
                         </button>
                       }
-                    >
-                      Clone a Git repository, pull updates, and import .ipynb or
-                      Databricks .py notebooks.
-                    </Empty>
-                  </section>
-                ) : null}
-                <div className="info-strip">
-                  <GitBranch size={17} />
-                  <span>
-                    Repositories are cloned onto this server. Private repository
-                    access uses the host&apos;s configured Git credentials.
-                  </span>
-                </div>
+                    />
+                    <div className="repository-grid">
+                      {repositories.map((repo) => (
+                        <section className="card repository-card" key={repo.id}>
+                          <div className="repository-top">
+                            <span className="repo-icon">
+                              <FolderGit2 size={24} />
+                            </span>
+                            <span className="subtle-tag">Git repository</span>
+                          </div>
+                          <h2>{repo.name}</h2>
+                          <p className="repository-url">{repo.url}</p>
+                          <div className="repository-meta">
+                            <span>
+                              <GitBranch size={14} />
+                              {repo.branch}
+                            </span>
+                            <code>{repo.commit?.slice(0, 7) || "—"}</code>
+                          </div>
+                          <div className="repository-updated">
+                            Last synced {relative(repo.updated_at)}
+                          </div>
+                          <div className="repository-actions">
+                            <button
+                              className="button"
+                              onClick={() => setSelectedRepositoryId(repo.id)}
+                            >
+                              <GitBranch size={14} />
+                              Git tools
+                            </button>
+                            <button
+                              className="button"
+                              disabled={busy}
+                              onClick={() =>
+                                void action(async () => {
+                                  await api(
+                                    `/repositories/${repo.id}/pull`,
+                                    json("POST"),
+                                  );
+                                }, "Repository updated.")
+                              }
+                            >
+                              <RefreshCw size={14} />
+                              Pull latest
+                            </button>
+                            <button
+                              className="button primary soft"
+                              disabled={busy}
+                              onClick={() => void importRepository(repo.id)}
+                            >
+                              <ArrowDownToLine size={14} />
+                              Import notebooks
+                            </button>
+                          </div>
+                        </section>
+                      ))}
+                    </div>
+                    {!repositories.length ? (
+                      <section className="card">
+                        <Empty
+                          icon={<FolderGit2 size={30} />}
+                          title="Great work starts with a commit"
+                          action={
+                            <button
+                              className="button primary"
+                              onClick={() => setModal("repository")}
+                            >
+                              <Plus size={15} />
+                              Connect a repository
+                            </button>
+                          }
+                        >
+                          Clone a Git repository, pull updates, and import
+                          .ipynb or Databricks .py notebooks.
+                        </Empty>
+                      </section>
+                    ) : null}
+                    <div className="info-strip">
+                      <GitBranch size={17} />
+                      <span>
+                        Repositories are cloned onto this server. Private
+                        repository access uses the host&apos;s configured Git
+                        credentials.
+                      </span>
+                    </div>
+                  </>
+                )}
               </>
             ) : null}
             {view === "packages" ? (
@@ -1910,12 +2036,28 @@ export function OpenBricks() {
               </>
             ) : null}
             {view === "compute" ? (
-              <ClustersPanel
-                clusters={clusters}
-                admin={user.role === "admin"}
-                onChanged={refresh}
-                onError={notifyError}
-              />
+              <>
+                <ClustersPanel
+                  clusters={clusters}
+                  admin={user.role === "admin"}
+                  onChanged={refresh}
+                  onError={notifyError}
+                />
+                <ResourceControls
+                  projectId={projectId}
+                  clusters={clusters.filter(
+                    (cluster) =>
+                      cluster.id === "local" ||
+                      projects
+                        .find((project) => project.id === projectId)
+                        ?.cluster_ids?.includes(cluster.id),
+                  )}
+                  admin={user.role === "admin"}
+                  userId={user.id}
+                  canManage={currentRole === "owner"}
+                  onError={notifyError}
+                />
+              </>
             ) : null}
             {view === "connections" ? (
               <ConnectionsPanel
@@ -2042,7 +2184,7 @@ export function OpenBricks() {
                 OPENBRICKS
               </span>
               <span>An open home for your data work.</span>
-              <span>Open compute platform · v0.3 beta</span>
+              <span>Open compute platform · v0.4 beta</span>
             </footer>
           </main>
         )}
@@ -2301,6 +2443,46 @@ export function OpenBricks() {
               </button>
             </div>
           </form>
+        </Modal>
+      ) : null}
+      {importConflict ? (
+        <Modal
+          title="Review notebook import conflicts"
+          onClose={() => setImportConflict(null)}
+        >
+          <div className="modal-form">
+            <p>
+              These workspace notebooks have changes since their last Git
+              import. Export them through Git tools to keep those edits, or
+              replace their cell sources with the repository versions.
+            </p>
+            {importConflict.conflicts.map((item) => (
+              <div className="history-row" key={item.id}>
+                <strong>{item.name}</strong>
+                <code>{item.path}</code>
+              </div>
+            ))}
+            <div className="modal-footer">
+              <button
+                className="button"
+                onClick={() => {
+                  setSelectedRepositoryId(importConflict.repositoryId);
+                  setImportConflict(null);
+                }}
+              >
+                Open Git tools
+              </button>
+              <button
+                className="button danger"
+                disabled={busy}
+                onClick={() =>
+                  void importRepository(importConflict.repositoryId, true)
+                }
+              >
+                Replace reviewed cell sources
+              </button>
+            </div>
+          </div>
         </Modal>
       ) : null}
       {selectedRun ? (
