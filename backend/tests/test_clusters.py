@@ -136,7 +136,7 @@ def test_remote_routing_persists_results_without_credentials(tmp_path, monkeypat
         raise AssertionError(str(request.url))
 
     monkeypatch.setattr(compute_client, "client_for", lambda store, entry: httpx.Client(base_url=entry["url"], transport=httpx.MockTransport(handler)))
-    monkeypatch.setattr(compute_client, "connection_snapshot", lambda store: [{"id": "sql", "name": "warehouse", "secrets": {"password": "sensitive-sql-secret"}}])
+    monkeypatch.setattr(compute_client, "connection_snapshot", lambda store, notebook=None: [{"id": "sql", "name": "warehouse", "secrets": {"password": "sensitive-sql-secret"}}])
     runtime = Runtime(store)
     runtime.start()
     try:
@@ -165,7 +165,7 @@ def test_different_clusters_execute_concurrently(tmp_path, monkeypatch):
         return httpx.Response(200, json={"id": request.url.path.rsplit("/", 1)[1], "status": "succeeded", "outputs": []})
 
     monkeypatch.setattr(compute_client, "client_for", lambda store, entry: httpx.Client(base_url=entry["url"], transport=httpx.MockTransport(handler)))
-    monkeypatch.setattr(compute_client, "connection_snapshot", lambda store: [])
+    monkeypatch.setattr(compute_client, "connection_snapshot", lambda store, notebook=None: [])
     runtime = Runtime(store)
     runtime.start()
     try:
@@ -186,7 +186,7 @@ def test_remote_connection_failure_is_sanitized(tmp_path, monkeypatch):
         raise httpx.ConnectError("sensitive network details", request=request)
 
     monkeypatch.setattr(compute_client, "client_for", lambda store, entry: httpx.Client(base_url=entry["url"], transport=httpx.MockTransport(handler)))
-    monkeypatch.setattr(compute_client, "connection_snapshot", lambda store: [])
+    monkeypatch.setattr(compute_client, "connection_snapshot", lambda store, notebook=None: [])
     runtime = Runtime(store)
     runtime.start()
     try:
@@ -215,7 +215,7 @@ def test_management_restart_reattaches_idempotent_remote_run(tmp_path, monkeypat
         return httpx.Response(200, json={"id": id, "status": "succeeded", "outputs": []})
 
     monkeypatch.setattr(compute_client, "client_for", lambda store, entry: httpx.Client(base_url=entry["url"], transport=httpx.MockTransport(handler)))
-    monkeypatch.setattr(compute_client, "connection_snapshot", lambda store: [])
+    monkeypatch.setattr(compute_client, "connection_snapshot", lambda store, notebook=None: [])
     runtime = Runtime(store)
     runtime.start()
     try:
@@ -248,7 +248,7 @@ def test_lost_submission_acknowledgement_reuses_id_and_poll_reconnects(tmp_path,
         return httpx.Response(200, json={"id": id, "status": "succeeded", "outputs": []})
 
     monkeypatch.setattr(compute_client, "client_for", lambda store, entry: httpx.Client(base_url=entry["url"], transport=httpx.MockTransport(handler)))
-    monkeypatch.setattr(compute_client, "connection_snapshot", lambda store: [])
+    monkeypatch.setattr(compute_client, "connection_snapshot", lambda store, notebook=None: [])
     runtime = Runtime(store)
     runtime.start()
     try:

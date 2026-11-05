@@ -24,7 +24,17 @@ from zoneinfo import ZoneInfo
 import psutil
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
-from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, Response, UploadFile
+from fastapi import (
+    Depends,
+    FastAPI,
+    File,
+    Form,
+    HTTPException,
+    Query,
+    Request,
+    Response,
+    UploadFile,
+)
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
@@ -33,6 +43,8 @@ from .notebooks import export_notebook, new_cell, parse_notebook
 from .runtime import Runtime, RuntimeBusy, now
 from .security import bucket_name, confined_path, password_hash, password_matches
 from .store import Store
+from .permissions import Access, AccessProxy, DEFAULT_PROJECT, register_project_routes
+from .revisions import record_revision, register_revision_routes
 
 COOKIE = "openbricks_session"
 
@@ -59,21 +71,31 @@ class NotebookInput(BaseModel):
     cells: list[Cell] | None = Field(default=None, max_length=500)
     folder_id: str | None = Field(default=None, max_length=80)
     cluster_id: str | None = Field(default=None, max_length=80)
+    project_id: str = DEFAULT_PROJECT
+    connection_ids: list[str] = Field(default_factory=list, max_length=100)
+    parameter_definitions: list[dict] = Field(default_factory=list, max_length=64)
+    environment_id: str | None = None
+    version: int | None = Field(default=None, ge=1)
 
 
 class FolderInput(BaseModel):
     name: str = Field(min_length=1, max_length=200)
     parent_id: str | None = Field(default=None, max_length=80)
+    project_id: str = DEFAULT_PROJECT
 
 
 class NotebookLocation(BaseModel):
     folder_id: str | None = Field(default=None, max_length=80)
     cluster_id: str | None = Field(default=None, max_length=80)
+    project_id: str | None = None
 
 
 class RunInput(BaseModel):
     cell_id: str | None = None
     cluster_id: str | None = Field(default=None, max_length=80)
+    parameters: dict = Field(default_factory=dict, max_length=64)
+    environment_id: str | None = None
+    timeout_seconds: int | None = Field(default=None, ge=1, le=86400)
 
 
 class BasicSchedule(BaseModel):
@@ -81,12 +103,20 @@ class BasicSchedule(BaseModel):
     interval: int = Field(default=1, ge=1, le=23)
     minute: int = Field(default=0, ge=0, le=59)
     time: str = Field(default="09:00", max_length=5)
-    days_of_week: list[int] = Field(default_factory=lambda: [1, 2, 3, 4, 5], max_length=7)
+    days_of_week: list[int] = Field(
+        default_factory=lambda: [1, 2, 3, 4, 5], max_length=7
+    )
 
 
 class JobInput(BaseModel):
     name: str = Field(min_length=1, max_length=200)
-    notebook_id: str
+    notebook_id: str | None = None
+    workflow_id: str | None = None
+    project_id: str = DEFAULT_PROJECT
+    parameters: dict = Field(default_factory=dict, max_length=64)
+    environment_id: str | None = None
+    notification_ids: list[str] = Field(default_factory=list, max_length=20)
+    timeout_seconds: int = Field(default=3600, ge=1, le=86400)
     cron: str = Field(default="0 9 * * *", max_length=100)
     timezone: str = "UTC"
     enabled: bool = True
@@ -99,6 +129,7 @@ class RepositoryInput(BaseModel):
     name: str = Field(min_length=1, max_length=100)
     url: str = Field(min_length=1, max_length=2000)
     branch: str = Field(default="main", min_length=1, max_length=200)
+    project_id: str = DEFAULT_PROJECT
 
 
 class BuildInput(BaseModel):
@@ -108,13 +139,18 @@ class BuildInput(BaseModel):
 
 class BucketInput(BaseModel):
     name: str
+    project_id: str = DEFAULT_PROJECT
 
 
 def public(value):
     if isinstance(value, list):
         return [public(item) for item in value]
     if isinstance(value, dict):
-        return {key: public(item) for key, item in value.items() if not key.startswith("_") and key not in ("password_hash", "expires_at")}
+        return {
+            key: public(item)
+            for key, item in value.items()
+            if not key.startswith("_") and key not in ("password_hash", "expires_at")
+        }
     return value
 
 
@@ -125,7 +161,9 @@ def cron_trigger(expression, timezone_name):
         raise ValueError("Use a valid IANA timezone, such as UTC or America/New_York")
     fields = expression.split()
     if len(fields) != 5:
-        raise ValueError("Use a five-field cron expression: minute hour day month weekday")
+        raise ValueError(
+            "Use a five-field cron expression: minute hour day month weekday"
+        )
     # Crontab numbers Sunday=0/7; APScheduler 3 numbers Monday=0. Translate explicitly.
     names = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"]
     if re.fullmatch(r"[0-9*/,\-]+", fields[4]) and fields[4] != "*":
@@ -143,7 +181,7 @@ def cron_trigger(expression, timezone_name):
                 start = int(base)
                 end = 7 if step_value else start
             if not 0 <= start <= end <= 7:
-                raise ValueError("Cron weekday numbers must be 0–7")
+                raise ValueError("Cron weekday numbers must be 0â€“7")
             days.update(value % 7 for value in range(start, end + 1, step))
         fields[4] = ",".join(names[day] for day in sorted(days))
     return CronTrigger.from_crontab(" ".join(fields), timezone=timezone_name)
@@ -154,64 +192,194 @@ def create_app(data_dir=None):
     async def lifespan(app):
         directory = Path(data_dir or os.getenv("DATA_DIR", "./data")).resolve()
         app.state.store = Store(directory)
-        for subdir in ("notebooks", "repositories", "wheels", "site-packages", "buckets", "warehouse", "logs"):
+        for subdir in (
+            "notebooks",
+            "repositories",
+            "wheels",
+            "site-packages",
+            "buckets",
+            "warehouse",
+            "logs",
+        ):
             (directory / subdir).mkdir(exist_ok=True)
         store = app.state.store
         if not store.list("users"):
             password = os.getenv("OPENBRICKS_ADMIN_PASSWORD", "")
             username = os.getenv("OPENBRICKS_ADMIN_USERNAME", "admin")
             if len(password) < 12:
-                raise RuntimeError("Set OPENBRICKS_ADMIN_PASSWORD to at least 12 characters for first startup")
-            store.put("users", {"id": uuid4().hex, "username": username, "role": "admin", "password_hash": password_hash(password), "created_at": now()})
+                raise RuntimeError(
+                    "Set OPENBRICKS_ADMIN_PASSWORD to at least 12 characters for first startup"
+                )
+            store.put(
+                "users",
+                {
+                    "id": uuid4().hex,
+                    "username": username,
+                    "role": "admin",
+                    "password_hash": password_hash(password),
+                    "created_at": now(),
+                },
+            )
         if not store.get("settings", "initialized"):
-            notebook = {"id": uuid4().hex, "name": "Welcome to OpenBricks", "description": "Your first local Spark notebook. Run each cell to explore Python, Spark SQL and local blob storage.", "language": "python",
-                        "created_at": now(), "updated_at": now(), "repository_id": None, "path": None, "folder_id": None, "cluster_id": None,
-                        "cells": [new_cell("markdown", "# Your lakehouse, on your machine\n\nPython and Spark SQL share one local Spark runtime. Data stays in your Docker volume. Run all to try this notebook."),
-                                  new_cell("python", "orders = spark.createDataFrame([('Coffee', 24), ('Tea', 18), ('Pastry', 32)], ['product', 'revenue'])\norders.createOrReplaceTempView('orders')\ndisplay(orders)"),
-                                  new_cell("sql", "SELECT product, revenue, ROUND(revenue / SUM(revenue) OVER () * 100, 1) AS share_pct\nFROM orders\nORDER BY revenue DESC"),
-                                  new_cell("python", "blob.write_bytes('blob://workspace/hello.txt', b'Hello from OpenBricks!')\nprint(blob.read_bytes('blob://workspace/hello.txt').decode())\nprint(blob.path('blob://workspace/hello.txt'))")]}
+            notebook = {
+                "id": uuid4().hex,
+                "name": "Welcome to OpenBricks",
+                "description": "Your first local Spark notebook. Run each cell to explore Python, Spark SQL and local blob storage.",
+                "language": "python",
+                "created_at": now(),
+                "updated_at": now(),
+                "repository_id": None,
+                "path": None,
+                "folder_id": None,
+                "cluster_id": None,
+                "cells": [
+                    new_cell(
+                        "markdown",
+                        "# Your lakehouse, on your machine\n\nPython and Spark SQL share one local Spark runtime. Data stays in your Docker volume. Run all to try this notebook.",
+                    ),
+                    new_cell(
+                        "python",
+                        "orders = spark.createDataFrame([('Coffee', 24), ('Tea', 18), ('Pastry', 32)], ['product', 'revenue'])\norders.createOrReplaceTempView('orders')\ndisplay(orders)",
+                    ),
+                    new_cell(
+                        "sql",
+                        "SELECT product, revenue, ROUND(revenue / SUM(revenue) OVER () * 100, 1) AS share_pct\nFROM orders\nORDER BY revenue DESC",
+                    ),
+                    new_cell(
+                        "python",
+                        "blob.write_bytes('blob://workspace/hello.txt', b'Hello from OpenBricks!')\nprint(blob.read_bytes('blob://workspace/hello.txt').decode())\nprint(blob.path('blob://workspace/hello.txt'))",
+                    ),
+                ],
+            }
             store.put("notebooks", notebook)
             save_notebook_file(store, notebook)
             (directory / "buckets" / "workspace").mkdir(exist_ok=True)
-            store.put("buckets", {"id": "workspace", "name": "workspace", "created_at": now()})
+            store.put(
+                "buckets", {"id": "workspace", "name": "workspace", "created_at": now()}
+            )
             store.put("settings", {"id": "initialized", "created_at": now()})
+        app.state.access = Access(store)
+        app.state.access.seed()
         app.state.runtime = Runtime(store)
-        app.state.scheduler = BackgroundScheduler(timezone="UTC", job_defaults={"coalesce": True, "max_instances": 1, "misfire_grace_time": 60})
+        from .workflows import WorkflowManager
+
+        app.state.workflows = WorkflowManager(
+            store, app.state.runtime, app.state.access
+        )
+        from .operations import Operations
+        from .notifications import NotificationManager
+
+        app.state.maintenance = None
+        app.state.restore_required = False
+        app.state.operations = Operations(app)
+        app.state.notifications = NotificationManager(store)
+        app.state.scheduler = BackgroundScheduler(
+            timezone="UTC",
+            job_defaults={
+                "coalesce": True,
+                "max_instances": 1,
+                "misfire_grace_time": 60,
+            },
+        )
         app.state.started = time.monotonic()
         app.state.login_attempts = defaultdict(deque)
         app.state.runtime.start()
+        app.state.workflows.start()
         app.state.scheduler.start()
+        app.state.operations.start()
+        app.state.notifications.start()
         for job in store.list("jobs"):
+            if not job.get("run_as_user_id"):
+                administrator = next(
+                    (
+                        account
+                        for account in store.list("users")
+                        if account.get("role") == "admin"
+                    ),
+                    None,
+                )
+                if administrator:
+                    job["run_as_user_id"] = administrator["id"]
+                    job.setdefault("project_id", DEFAULT_PROJECT)
+                    store.put("jobs", job)
             schedule(app, job)
         try:
             yield
         finally:
+            app.state.operations.close()
+            app.state.notifications.close()
             app.state.scheduler.shutdown(wait=False)
+            app.state.workflows.close()
             app.state.runtime.close()
 
-    app = FastAPI(title="OpenBricks", version="0.1.0", lifespan=lifespan, docs_url=None, redoc_url=None)
+    app = FastAPI(
+        title="OpenBricks",
+        version="0.3.0",
+        lifespan=lifespan,
+        docs_url=None,
+        redoc_url=None,
+    )
+    access = AccessProxy(app)
 
     @app.middleware("http")
     async def browser_security(request: Request, call_next):
+        maintenance = getattr(request.app.state, "maintenance", None)
+        if (
+            maintenance
+            and request.url.path != "/api/health"
+            and (
+                getattr(request.app.state, "restore_required", False)
+                or request.method not in ("GET", "HEAD", "OPTIONS")
+            )
+        ):
+            return JSONResponse({"detail": maintenance}, status_code=503)
         if request.method not in ("GET", "HEAD", "OPTIONS"):
             origin = request.headers.get("origin")
             if origin:
-                expected_host = request.headers.get("x-forwarded-host", request.headers.get("host", "")).split(",")[0].strip()
+                expected_host = (
+                    request.headers.get(
+                        "x-forwarded-host", request.headers.get("host", "")
+                    )
+                    .split(",")[0]
+                    .strip()
+                )
                 configured = os.getenv("OPENBRICKS_PUBLIC_URL", "")
                 allowed = {expected_host}
                 if configured:
                     allowed.add(urlparse(configured).netloc)
                 if urlparse(origin).netloc not in allowed:
-                    return JSONResponse({"detail": "Cross-origin requests are not allowed"}, status_code=403)
+                    return JSONResponse(
+                        {"detail": "Cross-origin requests are not allowed"},
+                        status_code=403,
+                    )
             length = request.headers.get("content-length")
             max_bytes = int(os.getenv("OPENBRICKS_MAX_UPLOAD_MB", "100")) * 1024 * 1024
             if length:
                 try:
                     if int(length) > max_bytes + 1024 * 1024:
-                        return JSONResponse({"detail": "Upload exceeds the configured size limit"}, status_code=413)
+                        return JSONResponse(
+                            {"detail": "Upload exceeds the configured size limit"},
+                            status_code=413,
+                        )
                 except ValueError:
-                    return JSONResponse({"detail": "Invalid content length"}, status_code=400)
-        response = await call_next(request)
+                    return JSONResponse(
+                        {"detail": "Invalid content length"}, status_code=400
+                    )
+        operations = getattr(request.app.state, "operations", None)
+        mutation = request.method not in (
+            "GET",
+            "HEAD",
+            "OPTIONS",
+        ) and not request.url.path.startswith(("/api/backups", "/api/operations"))
+        if mutation and operations and not operations.enter_mutation():
+            return JSONResponse(
+                {"detail": "Workspace maintenance is in progress"}, status_code=503
+            )
+        try:
+            response = await call_next(request)
+        finally:
+            if mutation and operations:
+                operations.leave_mutation()
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["X-Frame-Options"] = "DENY"
         response.headers["Cache-Control"] = "no-store"
@@ -247,7 +415,54 @@ def create_app(data_dir=None):
         result = request.app.state.store.get(kind, id)
         if not result:
             raise HTTPException(404, f"{kind.rstrip('s').title()} not found")
+        if kind in (
+            "notebooks",
+            "folders",
+            "jobs",
+            "runs",
+            "repositories",
+            "buckets",
+            "workflows",
+            "workflow_runs",
+        ):
+            action = (
+                "read"
+                if request.method in ("GET", "HEAD")
+                else (
+                    "run"
+                    if request.url.path.endswith(
+                        ("/run", "/cancel", "/repair", "/rerun")
+                    )
+                    else "edit"
+                )
+            )
+            access.require_project(
+                authenticated(request),
+                result.get("project_id") or DEFAULT_PROJECT,
+                action,
+            )
         return result
+
+    def project_scope(user, project_id=None, action="read"):
+        if project_id:
+            access.require_project(user, project_id, action)
+            return [project_id]
+        return access.visible_project_ids(user, action)
+
+    def notebook_project(store, folder_id, project_id):
+        folder = store.get("folders", folder_id) if folder_id else None
+        if folder and project_id == DEFAULT_PROJECT:
+            project_id = folder.get("project_id") or DEFAULT_PROJECT
+        if folder and (folder.get("project_id") or DEFAULT_PROJECT) != project_id:
+            raise ValueError("Notebook and folder must belong to the same project")
+        return project_id
+
+    def validate_notebook_access(user, store, values):
+        project_id = values.get("project_id") or DEFAULT_PROJECT
+        access.require_project(user, project_id, "edit")
+        access.require_cluster(user, values.get("cluster_id"), project_id, "edit")
+        for connection_id in values.get("connection_ids", []):
+            access.require_connection(user, connection_id, project_id, "edit")
 
     @app.get("/api/health")
     def health():
@@ -255,16 +470,36 @@ def create_app(data_dir=None):
 
     @app.post("/api/auth/login")
     def login(body: Login, request: Request, response: Response):
-        key = (request.client.host if request.client else "local", body.username.lower())
+        key = (
+            request.client.host if request.client else "local",
+            body.username.lower(),
+        )
         attempts = request.app.state.login_attempts[key]
         cutoff = time.monotonic() - 300
         while attempts and attempts[0] < cutoff:
             attempts.popleft()
         if len(attempts) >= 10:
-            raise HTTPException(429, "Too many sign-in attempts. Try again in five minutes")
+            raise HTTPException(
+                429, "Too many sign-in attempts. Try again in five minutes"
+            )
         attempts.append(time.monotonic())
-        user = next((user for user in request.app.state.store.list("users") if user["username"].lower() == body.username.lower()), None)
-        valid = password_matches(body.password, user["password_hash"] if user else "pbkdf2_sha256$600000$00000000000000000000000000000000$" + "00" * 32)
+        user = next(
+            (
+                user
+                for user in request.app.state.store.list("users")
+                if user["username"].lower() == body.username.lower()
+            ),
+            None,
+        )
+        valid = password_matches(
+            body.password,
+            (
+                user["password_hash"]
+                if user
+                else "pbkdf2_sha256$600000$00000000000000000000000000000000$"
+                + "00" * 32
+            ),
+        )
         if not user or not valid:
             raise HTTPException(401, "Incorrect username or password")
         attempts.clear()
@@ -274,8 +509,23 @@ def create_app(data_dir=None):
         for session in store.list("sessions"):
             if session["expires_at"] < now():
                 store.delete("sessions", session["id"])
-        store.put("sessions", {"id": hashlib.sha256(token.encode()).hexdigest(), "user_id": user["id"], "expires_at": expires})
-        response.set_cookie(COOKIE, token, httponly=True, secure=os.getenv("OPENBRICKS_SECURE_COOKIE", "false").lower() == "true", samesite="strict", max_age=7 * 86400, path="/")
+        store.put(
+            "sessions",
+            {
+                "id": hashlib.sha256(token.encode()).hexdigest(),
+                "user_id": user["id"],
+                "expires_at": expires,
+            },
+        )
+        response.set_cookie(
+            COOKIE,
+            token,
+            httponly=True,
+            secure=os.getenv("OPENBRICKS_SECURE_COOKIE", "false").lower() == "true",
+            samesite="strict",
+            max_age=7 * 86400,
+            path="/",
+        )
         return public(user)
 
     @app.get("/api/auth/me")
@@ -285,7 +535,9 @@ def create_app(data_dir=None):
     @app.post("/api/auth/logout")
     def logout(request: Request, response: Response, user=Depends(authenticated)):
         token = request.cookies.get(COOKIE, "")
-        request.app.state.store.delete("sessions", hashlib.sha256(token.encode()).hexdigest())
+        request.app.state.store.delete(
+            "sessions", hashlib.sha256(token.encode()).hexdigest()
+        )
         response.delete_cookie(COOKIE, path="/")
         return {"ok": True}
 
@@ -296,28 +548,69 @@ def create_app(data_dir=None):
     @app.post("/api/users", status_code=201)
     def create_user(body: UserCreate, request: Request, user=Depends(admin)):
         if not re.fullmatch(r"[a-zA-Z0-9_.-]{1,64}", body.username):
-            raise ValueError("Username may contain letters, digits, dots, dashes and underscores")
+            raise ValueError(
+                "Username may contain letters, digits, dots, dashes and underscores"
+            )
         if len(body.password) < 12:
             raise ValueError("Passwords must contain at least 12 characters")
         if body.role not in ("admin", "member"):
             raise ValueError("Role must be admin or member")
         store = request.app.state.store
-        if any(item["username"].lower() == body.username.lower() for item in store.list("users")):
+        if any(
+            item["username"].lower() == body.username.lower()
+            for item in store.list("users")
+        ):
             raise HTTPException(409, "Username is already in use")
-        return public(store.put("users", {"id": uuid4().hex, "username": body.username, "password_hash": password_hash(body.password), "role": body.role, "created_at": now()}))
+        account = store.put(
+            "users",
+            {
+                "id": uuid4().hex,
+                "username": body.username,
+                "password_hash": password_hash(body.password),
+                "role": body.role,
+                "created_at": now(),
+            },
+        )
+        if body.role != "admin":
+            access.add_default_member(account["id"])
+        return public(account)
 
     @app.get("/api/overview")
-    def overview(request: Request, user=Depends(authenticated)):
+    def overview(
+        request: Request, project_id: str | None = None, user=Depends(authenticated)
+    ):
         store = request.app.state.store
-        recent = store.notebook_page(None, limit=12, all_folders=True)["items"]
-        return {"notebooks": [notebook_view(store, item) for item in recent], "runs": public(store.run_page(limit=8)["items"]),
-                "jobs": [job_view(request.app, job) for job in store.list("jobs", limit=500)], "metrics": store.metrics(),
-                "repositories": public(store.list("repositories", limit=500)), "packages": public(store.list("packages", limit=500)), "buckets": bucket_views(store), "compute": compute(request.app)}
+        scope = project_scope(user, project_id)
+        recent = store.notebook_page(
+            None, limit=12, all_folders=True, project_ids=scope
+        )["items"]
+        return {
+            "notebooks": [notebook_view(store, item) for item in recent],
+            "runs": public(store.run_page(limit=8, project_ids=scope)["items"]),
+            "jobs": [
+                job_view(request.app, job)
+                for job in store.job_page(limit=500, project_ids=scope)["items"]
+            ],
+            "metrics": store.metrics(scope),
+            "repositories": public(
+                store.page("repositories", project_ids=scope, limit=500)["items"]
+            ),
+            "packages": public(store.list("packages", limit=500)),
+            "buckets": bucket_views(store, scope),
+            "compute": compute(request.app),
+        }
 
     @app.get("/api/folders")
-    def folders(request: Request, user=Depends(authenticated)):
+    def folders(
+        request: Request, project_id: str | None = None, user=Depends(authenticated)
+    ):
         store = request.app.state.store
-        return [folder_view(store, item) for item in store.list("folders", limit=5000)]
+        return [
+            folder_view(store, item)
+            for item in store.page(
+                "folders", project_ids=project_scope(user, project_id), limit=5000
+            )["items"]
+        ]
 
     @app.post("/api/folders", status_code=201)
     def create_folder(body: FolderInput, request: Request, user=Depends(authenticated)):
@@ -325,23 +618,62 @@ def create_app(data_dir=None):
         name = folder_name(body.name)
         parent_id = body.parent_id or None
         require_folder(store, parent_id)
+        project_id = notebook_project(store, parent_id, body.project_id)
+        access.require_project(user, project_id, "edit")
         with store.lock:
-            if any(item["name"].casefold() == name.casefold() for item in store.folder_children(parent_id)):
+            if any(
+                item["name"].casefold() == name.casefold()
+                for item in store.folder_children(parent_id, [project_id])
+            ):
                 raise HTTPException(409, "A folder with this name already exists here")
-            item = store.put("folders", {"id": uuid4().hex, "name": name, "parent_id": parent_id, "created_at": now(), "updated_at": now()})
+            item = store.put(
+                "folders",
+                {
+                    "id": uuid4().hex,
+                    "name": name,
+                    "parent_id": parent_id,
+                    "project_id": project_id,
+                    "created_at": now(),
+                    "updated_at": now(),
+                },
+            )
         return folder_view(store, item)
 
     @app.put("/api/folders/{id}")
-    def update_folder(id: str, body: FolderInput, request: Request, user=Depends(authenticated)):
+    def update_folder(
+        id: str, body: FolderInput, request: Request, user=Depends(authenticated)
+    ):
         store = request.app.state.store
         with store.lock:
             item = lookup(request, "folders", id)
-            parent_id = (body.parent_id or None) if "parent_id" in body.model_fields_set else item.get("parent_id")
+            parent_id = (
+                (body.parent_id or None)
+                if "parent_id" in body.model_fields_set
+                else item.get("parent_id")
+            )
             require_folder(store, parent_id)
-            if parent_id == id or any(parent["id"] == id for parent in folder_breadcrumbs(store, parent_id)):
-                raise ValueError("A folder cannot be moved inside itself or one of its descendants")
+            project_id = item.get("project_id") or DEFAULT_PROJECT
+            if (
+                parent_id
+                and (
+                    store.get("folders", parent_id).get("project_id") or DEFAULT_PROJECT
+                )
+                != project_id
+            ):
+                raise ValueError(
+                    "Move notebooks individually to transfer them between projects"
+                )
+            if parent_id == id or any(
+                parent["id"] == id for parent in folder_breadcrumbs(store, parent_id)
+            ):
+                raise ValueError(
+                    "A folder cannot be moved inside itself or one of its descendants"
+                )
             name = folder_name(body.name)
-            if any(sibling["id"] != id and sibling["name"].casefold() == name.casefold() for sibling in store.folder_children(parent_id)):
+            if any(
+                sibling["id"] != id and sibling["name"].casefold() == name.casefold()
+                for sibling in store.folder_children(parent_id, [project_id])
+            ):
                 raise HTTPException(409, "A folder with this name already exists here")
             item.update(name=name, parent_id=parent_id, updated_at=now())
             store.put("folders", item)
@@ -353,67 +685,183 @@ def create_app(data_dir=None):
         with store.lock:
             lookup(request, "folders", id)
             if store.folder_has_content(id):
-                raise HTTPException(409, "Move or delete this folder's notebooks and child folders first")
+                raise HTTPException(
+                    409,
+                    "Move or delete this folder's notebooks and child folders first",
+                )
             store.delete("folders", id)
         return {"ok": True}
 
     @app.get("/api/workspace")
-    def workspace(request: Request, folder_id: str | None = None, search: str = Query(default="", max_length=200),
-                  limit: int = Query(default=50, ge=1, le=200), offset: int = Query(default=0, ge=0), all_folders: bool = False, user=Depends(authenticated)):
+    def workspace(
+        request: Request,
+        folder_id: str | None = None,
+        search: str = Query(default="", max_length=200),
+        limit: int = Query(default=50, ge=1, le=200),
+        offset: int = Query(default=0, ge=0),
+        all_folders: bool = False,
+        project_id: str | None = None,
+        user=Depends(authenticated),
+    ):
         store = request.app.state.store
         folder_id = folder_id or None
         require_folder(store, folder_id)
-        page = store.notebook_page(folder_id, search.strip(), limit, offset, all_folders=all_folders or bool(search.strip()))
+        if folder_id:
+            access.require_project(
+                user,
+                store.get("folders", folder_id).get("project_id") or DEFAULT_PROJECT,
+            )
+        scope = project_scope(user, project_id)
+        page = store.notebook_page(
+            folder_id,
+            search.strip(),
+            limit,
+            offset,
+            all_folders=all_folders or bool(search.strip()),
+            project_ids=scope,
+        )
         page["items"] = [notebook_view(store, item) for item in page["items"]]
-        page["folders"] = [folder_view(store, item) for item in store.folder_children(folder_id)] if not search.strip() else []
+        page["folders"] = (
+            [
+                folder_view(store, item)
+                for item in store.folder_children(folder_id, scope)
+            ]
+            if not search.strip()
+            else []
+        )
         page["breadcrumbs"] = folder_breadcrumbs(store, folder_id)
         return page
 
     @app.get("/api/history/notebooks")
-    def notebook_history(request: Request, search: str = Query(default="", max_length=200), limit: int = Query(default=25, ge=1, le=100),
-                         offset: int = Query(default=0, ge=0), user=Depends(authenticated)):
+    def notebook_history(
+        request: Request,
+        search: str = Query(default="", max_length=200),
+        limit: int = Query(default=25, ge=1, le=100),
+        offset: int = Query(default=0, ge=0),
+        project_id: str | None = None,
+        user=Depends(authenticated),
+    ):
         store = request.app.state.store
-        page = store.run_notebook_page(search.strip(), limit, offset)
+        page = store.run_notebook_page(
+            search.strip(), limit, offset, project_ids=project_scope(user, project_id)
+        )
         for item in page["items"]:
-            item["folder_path"] = "/" + "/".join(folder["name"] for folder in folder_breadcrumbs(store, item.get("folder_id")))
+            item["folder_path"] = "/" + "/".join(
+                folder["name"]
+                for folder in folder_breadcrumbs(store, item.get("folder_id"))
+            )
             item["deleted"] = bool(item["deleted"])
         return page
 
     @app.get("/api/history/runs")
-    def paginated_runs(request: Request, notebook_id: str | None = None, status: str | None = None,
-                       limit: int = Query(default=25, ge=1, le=100), offset: int = Query(default=0, ge=0), user=Depends(authenticated)):
-        if status and status not in ("queued", "running", "succeeded", "failed", "cancelled"):
+    def paginated_runs(
+        request: Request,
+        notebook_id: str | None = None,
+        status: str | None = None,
+        limit: int = Query(default=25, ge=1, le=100),
+        offset: int = Query(default=0, ge=0),
+        project_id: str | None = None,
+        user=Depends(authenticated),
+    ):
+        if status and status not in (
+            "queued",
+            "running",
+            "succeeded",
+            "failed",
+            "cancelled",
+        ):
             raise ValueError("Unknown run status")
-        return public(request.app.state.store.run_page(notebook_id, status, limit, offset))
+        return public(
+            request.app.state.store.run_page(
+                notebook_id,
+                status,
+                limit,
+                offset,
+                project_ids=project_scope(user, project_id),
+            )
+        )
 
     @app.get("/api/compute")
     def get_compute(request: Request, user=Depends(authenticated)):
         return compute(request.app)
 
     @app.get("/api/notebooks")
-    def notebooks(request: Request, limit: int = Query(default=500, ge=1, le=1000), offset: int = Query(default=0, ge=0),
-                  search: str = Query(default="", max_length=200), user=Depends(authenticated)):
+    def notebooks(
+        request: Request,
+        limit: int = Query(default=500, ge=1, le=1000),
+        offset: int = Query(default=0, ge=0),
+        search: str = Query(default="", max_length=200),
+        project_id: str | None = None,
+        user=Depends(authenticated),
+    ):
         store = request.app.state.store
-        return [notebook_view(store, item) for item in store.notebook_page(None, search.strip(), limit, offset, all_folders=True)["items"]]
+        return [
+            notebook_view(store, item)
+            for item in store.notebook_page(
+                None,
+                search.strip(),
+                limit,
+                offset,
+                all_folders=True,
+                project_ids=project_scope(user, project_id),
+            )["items"]
+        ]
 
     @app.post("/api/notebooks", status_code=201)
-    def create_notebook(body: NotebookInput, request: Request, user=Depends(authenticated)):
+    def create_notebook(
+        body: NotebookInput, request: Request, user=Depends(authenticated)
+    ):
         values = validated_notebook(body)
         require_folder(request.app.state.store, values.get("folder_id"))
+        values["project_id"] = notebook_project(
+            request.app.state.store, values.get("folder_id"), values["project_id"]
+        )
+        validate_notebook_access(user, request.app.state.store, values)
         validate_cluster_reference(request.app.state.store, values.get("cluster_id"))
-        values.update(id=uuid4().hex, created_at=now(), updated_at=now(), repository_id=None, path=None)
+        values.update(
+            id=uuid4().hex,
+            created_at=now(),
+            updated_at=now(),
+            repository_id=None,
+            path=None,
+            version=1,
+        )
         request.app.state.store.put("notebooks", values)
         save_notebook_file(request.app.state.store, values)
+        record_revision(request.app.state.store, values, "created", user["id"])
         return notebook_view(request.app.state.store, values)
 
     @app.post("/api/notebooks/import", status_code=201)
-    async def import_notebook(request: Request, file: UploadFile = File(...), folder_id: str = Form(""), user=Depends(authenticated)):
+    async def import_notebook(
+        request: Request,
+        file: UploadFile = File(...),
+        folder_id: str = Form(""),
+        project_id: str = Form(DEFAULT_PROJECT),
+        user=Depends(authenticated),
+    ):
         require_folder(request.app.state.store, folder_id or None)
+        project_id = notebook_project(
+            request.app.state.store, folder_id or None, project_id
+        )
+        access.require_project(user, project_id, "edit")
         content = await limited_upload(file, 10 * 1024 * 1024)
         values = parse_notebook(file.filename or "notebook.ipynb", content)
-        values.update(id=uuid4().hex, created_at=now(), updated_at=now(), repository_id=None, path=None, folder_id=folder_id or None, cluster_id=None)
+        values.update(
+            id=uuid4().hex,
+            created_at=now(),
+            updated_at=now(),
+            repository_id=None,
+            path=None,
+            folder_id=folder_id or None,
+            cluster_id=None,
+            project_id=project_id,
+            connection_ids=[],
+            parameter_definitions=[],
+            version=1,
+        )
         request.app.state.store.put("notebooks", values)
         save_notebook_file(request.app.state.store, values)
+        record_revision(request.app.state.store, values, "imported", user["id"])
         return notebook_view(request.app.state.store, values)
 
     @app.get("/api/notebooks/{id}")
@@ -421,61 +869,167 @@ def create_app(data_dir=None):
         return notebook_view(request.app.state.store, lookup(request, "notebooks", id))
 
     @app.put("/api/notebooks/{id}")
-    def update_notebook(id: str, body: NotebookInput, request: Request, user=Depends(authenticated)):
-        notebook = lookup(request, "notebooks", id)
-        values = validated_notebook(body)
-        for key in ("folder_id", "cluster_id"):
-            if key not in body.model_fields_set:
-                values.pop(key, None)
-        require_folder(request.app.state.store, values.get("folder_id", notebook.get("folder_id")))
-        validate_cluster_reference(request.app.state.store, values.get("cluster_id", notebook.get("cluster_id")))
-        notebook.update(values, updated_at=now())
-        request.app.state.store.put("notebooks", notebook)
-        save_notebook_file(request.app.state.store, notebook)
-        return notebook_view(request.app.state.store, notebook)
+    def update_notebook(
+        id: str, body: NotebookInput, request: Request, user=Depends(authenticated)
+    ):
+        with request.app.state.store.lock:
+            notebook = lookup(request, "notebooks", id)
+            values = validated_notebook(body)
+            if body.version is not None and body.version != notebook.get("version", 1):
+                raise HTTPException(
+                    409,
+                    "This notebook changed in another tab. Reload or compare its revisions before saving",
+                )
+            values.pop("version", None)
+            for key in (
+                "folder_id",
+                "cluster_id",
+                "project_id",
+                "connection_ids",
+                "parameter_definitions",
+                "environment_id",
+            ):
+                if key not in body.model_fields_set:
+                    values.pop(key, None)
+            require_folder(
+                request.app.state.store,
+                values.get("folder_id", notebook.get("folder_id")),
+            )
+            validate_cluster_reference(
+                request.app.state.store,
+                values.get("cluster_id", notebook.get("cluster_id")),
+            )
+            candidate = {**notebook, **values}
+            candidate["project_id"] = notebook_project(
+                request.app.state.store,
+                candidate.get("folder_id"),
+                candidate.get("project_id") or DEFAULT_PROJECT,
+            )
+            validate_notebook_access(user, request.app.state.store, candidate)
+            with request.app.state.store.connect() as db:
+                has_revision = db.execute(
+                    "SELECT 1 FROM documents WHERE kind='notebook_revisions' AND notebook_id=? LIMIT 1",
+                    (id,),
+                ).fetchone()
+            if not has_revision:
+                record_revision(
+                    request.app.state.store, notebook, "before first edit", user["id"]
+                )
+            notebook.update(
+                candidate, updated_at=now(), version=notebook.get("version", 1) + 1
+            )
+            request.app.state.store.put("notebooks", notebook)
+            save_notebook_file(request.app.state.store, notebook)
+            record_revision(request.app.state.store, notebook, "saved", user["id"])
+            return notebook_view(request.app.state.store, notebook)
 
     @app.patch("/api/notebooks/{id}/location")
-    def move_notebook(id: str, body: NotebookLocation, request: Request, user=Depends(authenticated)):
+    def move_notebook(
+        id: str, body: NotebookLocation, request: Request, user=Depends(authenticated)
+    ):
         store = request.app.state.store
-        notebook = lookup(request, "notebooks", id)
-        if "folder_id" in body.model_fields_set:
-            require_folder(store, body.folder_id or None)
-            notebook["folder_id"] = body.folder_id or None
-        if "cluster_id" in body.model_fields_set:
-            validate_cluster_reference(store, body.cluster_id or None)
-            notebook["cluster_id"] = body.cluster_id or None
-        notebook["updated_at"] = now()
-        store.put("notebooks", notebook)
-        save_notebook_file(store, notebook)
-        return notebook_view(store, notebook)
+        with store.lock:
+            notebook = lookup(request, "notebooks", id)
+            if "project_id" in body.model_fields_set and body.project_id:
+                access.require_project(user, body.project_id, "edit")
+                notebook["project_id"] = body.project_id
+            if "folder_id" in body.model_fields_set:
+                require_folder(store, body.folder_id or None)
+                notebook["folder_id"] = body.folder_id or None
+            if "cluster_id" in body.model_fields_set:
+                validate_cluster_reference(store, body.cluster_id or None)
+                notebook["cluster_id"] = body.cluster_id or None
+            notebook["project_id"] = notebook_project(
+                store,
+                notebook.get("folder_id"),
+                notebook.get("project_id") or DEFAULT_PROJECT,
+            )
+            validate_notebook_access(user, store, notebook)
+            notebook["updated_at"] = now()
+            notebook["version"] = notebook.get("version", 1) + 1
+            store.put("notebooks", notebook)
+            save_notebook_file(store, notebook)
+            return notebook_view(store, notebook)
 
     @app.delete("/api/notebooks/{id}")
     def delete_notebook(id: str, request: Request, user=Depends(authenticated)):
-        lookup(request, "notebooks", id)
         store = request.app.state.store
-        if any(job["notebook_id"] == id for job in store.list("jobs")):
-            raise HTTPException(409, "Remove this notebook's schedules before deleting it")
-        store.delete("notebooks", id)
-        (store.directory / "notebooks" / f"{id}.ipynb").unlink(missing_ok=True)
+        with store.lock:
+            lookup(request, "notebooks", id)
+            if any(job.get("notebook_id") == id for job in store.list("jobs")):
+                raise HTTPException(
+                    409, "Remove this notebook's schedules before deleting it"
+                )
+            with store.connect() as db:
+                db.execute(
+                    "DELETE FROM documents WHERE kind='notebook_revisions' AND notebook_id=?",
+                    (id,),
+                )
+                db.execute(
+                    "DELETE FROM documents WHERE kind='notebooks' AND id=?", (id,)
+                )
+            (store.directory / "notebooks" / f"{id}.ipynb").unlink(missing_ok=True)
         return {"ok": True}
 
     @app.get("/api/notebooks/{id}/export")
     def export(id: str, request: Request, user=Depends(authenticated)):
         notebook = lookup(request, "notebooks", id)
         safe_name = re.sub(r"[^a-zA-Z0-9._-]", "_", notebook["name"])
-        return JSONResponse(export_notebook(notebook), headers={"Content-Disposition": f'attachment; filename="{safe_name}.ipynb"'})
+        return JSONResponse(
+            export_notebook(notebook),
+            headers={
+                "Content-Disposition": f'attachment; filename="{safe_name}.ipynb"'
+            },
+        )
 
     @app.post("/api/notebooks/{id}/run", status_code=202)
-    def run_notebook(id: str, request: Request, body: RunInput | None = None, user=Depends(authenticated)):
+    def run_notebook(
+        id: str,
+        request: Request,
+        body: RunInput | None = None,
+        user=Depends(authenticated),
+    ):
         notebook = lookup(request, "notebooks", id)
-        target = body.cluster_id if body and "cluster_id" in body.model_fields_set else notebook.get("cluster_id")
+        target = (
+            body.cluster_id
+            if body and "cluster_id" in body.model_fields_set
+            else notebook.get("cluster_id")
+        )
         validate_cluster_reference(request.app.state.store, target)
+        access.require_cluster(
+            user, target, notebook.get("project_id") or DEFAULT_PROJECT
+        )
+        for connection_id in notebook.get("connection_ids", []):
+            access.require_connection(
+                user, connection_id, notebook.get("project_id") or DEFAULT_PROJECT
+            )
         extra = {"cluster_id": target} if target else {}
-        return public(request.app.state.runtime.submit(notebook, body.cell_id if body else None, **extra))
+        if body and body.parameters:
+            extra["parameters"] = body.parameters
+        environment_id = (
+            body.environment_id
+            if body and body.environment_id
+            else notebook.get("environment_id")
+        )
+        if environment_id:
+            extra["environment_id"] = environment_id
+        if body and body.timeout_seconds:
+            extra["timeout_seconds"] = body.timeout_seconds
+        result = request.app.state.runtime.submit(
+            notebook, body.cell_id if body else None, **extra
+        )
+        access.audit(user, "notebook.run", notebook.get("project_id"), result["id"])
+        return public(result)
 
     @app.get("/api/runs")
-    def runs(request: Request, user=Depends(authenticated)):
-        return public(request.app.state.store.run_page(limit=200)["items"])
+    def runs(
+        request: Request, project_id: str | None = None, user=Depends(authenticated)
+    ):
+        return public(
+            request.app.state.store.run_page(
+                limit=200, project_ids=project_scope(user, project_id)
+            )["items"]
+        )
 
     @app.get("/api/runs/{id}")
     def run(id: str, request: Request, user=Depends(authenticated)):
@@ -487,35 +1041,83 @@ def create_app(data_dir=None):
         return public(request.app.state.runtime.cancel(id))
 
     @app.get("/api/jobs/page")
-    def paginated_jobs(request: Request, search: str = Query(default="", max_length=200),
-                       limit: int = Query(default=25, ge=1, le=100), offset: int = Query(default=0, ge=0), user=Depends(authenticated)):
-        page = request.app.state.store.job_page(search.strip(), limit, offset)
+    def paginated_jobs(
+        request: Request,
+        search: str = Query(default="", max_length=200),
+        limit: int = Query(default=25, ge=1, le=100),
+        offset: int = Query(default=0, ge=0),
+        project_id: str | None = None,
+        user=Depends(authenticated),
+    ):
+        page = request.app.state.store.job_page(
+            search.strip(), limit, offset, project_ids=project_scope(user, project_id)
+        )
         page["items"] = [job_view(request.app, job) for job in page["items"]]
         return page
 
     @app.get("/api/jobs")
-    def jobs(request: Request, user=Depends(authenticated)):
-        return [job_view(request.app, job) for job in request.app.state.store.list("jobs")]
+    def jobs(
+        request: Request, project_id: str | None = None, user=Depends(authenticated)
+    ):
+        return [
+            job_view(request.app, job)
+            for job in request.app.state.store.page(
+                "jobs", project_ids=project_scope(user, project_id), limit=1000
+            )["items"]
+        ]
+
+    def job_target(body, request, user):
+        if bool(body.notebook_id) == bool(body.workflow_id):
+            raise ValueError("Choose exactly one notebook or workflow")
+        target = lookup(
+            request,
+            "workflows" if body.workflow_id else "notebooks",
+            body.workflow_id or body.notebook_id,
+        )
+        project_id = target.get("project_id") or DEFAULT_PROJECT
+        access.require_project(user, project_id, "edit")
+        return target, project_id
 
     @app.post("/api/jobs", status_code=201)
     def create_job(body: JobInput, request: Request, user=Depends(authenticated)):
-        notebook = lookup(request, "notebooks", body.notebook_id)
+        notebook, project_id = job_target(body, request, user)
         values = validated_job(body)
         validate_cluster_reference(request.app.state.store, values.get("cluster_id"))
-        job = {**values, "id": uuid4().hex, "notebook_name": notebook["name"], "created_at": now(), "last_run_at": None}
+        access.require_cluster(user, values.get("cluster_id"), project_id, "edit")
+        job = {
+            **values,
+            "project_id": project_id,
+            "run_as_user_id": user["id"],
+            "id": uuid4().hex,
+            "notebook_name": notebook["name"],
+            "created_at": now(),
+            "last_run_at": None,
+        }
         request.app.state.store.put("jobs", job)
         schedule(request.app, job)
         return job_view(request.app, job)
 
     @app.put("/api/jobs/{id}")
-    def update_job(id: str, body: JobInput, request: Request, user=Depends(authenticated)):
+    def update_job(
+        id: str, body: JobInput, request: Request, user=Depends(authenticated)
+    ):
         job = lookup(request, "jobs", id)
-        notebook = lookup(request, "notebooks", body.notebook_id)
+        notebook, project_id = job_target(body, request, user)
         values = validated_job(body)
         if "cluster_id" not in body.model_fields_set:
             values.pop("cluster_id", None)
-        validate_cluster_reference(request.app.state.store, values.get("cluster_id", job.get("cluster_id")))
-        job.update(values, notebook_name=notebook["name"])
+        validate_cluster_reference(
+            request.app.state.store, values.get("cluster_id", job.get("cluster_id"))
+        )
+        access.require_cluster(
+            user, values.get("cluster_id", job.get("cluster_id")), project_id, "edit"
+        )
+        job.update(
+            values,
+            project_id=project_id,
+            notebook_name=notebook["name"],
+            run_as_user_id=job.get("run_as_user_id") or user["id"],
+        )
         request.app.state.store.put("jobs", job)
         schedule(request.app, job)
         return job_view(request.app, job)
@@ -529,31 +1131,69 @@ def create_app(data_dir=None):
         return {"ok": True}
 
     @app.post("/api/jobs/{id}/run", status_code=202)
-    def run_job(id: str, request: Request, user=Depends(authenticated)):
+    def run_job(
+        id: str,
+        request: Request,
+        body: RunInput | None = None,
+        user=Depends(authenticated),
+    ):
         job = lookup(request, "jobs", id)
-        notebook = lookup(request, "notebooks", job["notebook_id"])
-        target = job.get("cluster_id") or notebook.get("cluster_id")
-        extra = {"cluster_id": target} if target else {}
-        return public(request.app.state.runtime.submit(notebook, trigger="manual", job_id=id, **extra))
+        return public(
+            request.app.state.workflows.submit_job(
+                job,
+                parameters=body.parameters if body else None,
+                user=user,
+                trigger="manual",
+            )
+        )
 
     @app.get("/api/repositories")
-    def repositories(request: Request, user=Depends(authenticated)):
-        return public(request.app.state.store.list("repositories"))
+    def repositories(
+        request: Request, project_id: str | None = None, user=Depends(authenticated)
+    ):
+        return public(
+            request.app.state.store.page(
+                "repositories", project_ids=project_scope(user, project_id), limit=1000
+            )["items"]
+        )
 
     @app.post("/api/repositories", status_code=201)
-    def clone_repository(body: RepositoryInput, request: Request, user=Depends(authenticated)):
+    def clone_repository(
+        body: RepositoryInput, request: Request, user=Depends(authenticated)
+    ):
+        access.require_project(user, body.project_id, "edit")
         validate_git_url(body.url)
-        if body.branch.startswith("-") or not re.fullmatch(r"[A-Za-z0-9_./-]+", body.branch) or ".." in body.branch:
+        if (
+            body.branch.startswith("-")
+            or not re.fullmatch(r"[A-Za-z0-9_./-]+", body.branch)
+            or ".." in body.branch
+        ):
             raise ValueError("Invalid branch name")
         id = uuid4().hex
         store = request.app.state.store
         path = store.directory / "repositories" / id
         try:
-            git(["clone", "--single-branch", "--branch", body.branch, "--", body.url, str(path)])
+            git(
+                [
+                    "clone",
+                    "--single-branch",
+                    "--branch",
+                    body.branch,
+                    "--",
+                    body.url,
+                    str(path),
+                ]
+            )
         except Exception:
             shutil.rmtree(path, ignore_errors=True)
             raise
-        repo = {"id": id, **body.model_dump(), "path": str(path), "status": "ready", "updated_at": now()}
+        repo = {
+            "id": id,
+            **body.model_dump(),
+            "path": str(path),
+            "status": "ready",
+            "updated_at": now(),
+        }
         update_repository_info(repo)
         return store.put("repositories", repo)
 
@@ -568,36 +1208,95 @@ def create_app(data_dir=None):
 
     @app.post("/api/repositories/{id}/import")
     def import_repository(id: str, request: Request, user=Depends(authenticated)):
-        repo = lookup(request, "repositories", id)
-        store = request.app.state.store
-        base = store.directory / "repositories" / id
-        existing = {(nb.get("repository_id"), nb.get("path")): nb for nb in store.list("notebooks")}
-        imported = []
-        root_folder = repository_folder(store, repo)
-        for path in notebook_paths(base):
-            relative = path.relative_to(base).as_posix()
-            notebook = parse_notebook(path.name, path.read_bytes())
-            previous = existing.get((id, relative))
-            folder = root_folder
-            for part in path.relative_to(base).parent.parts:
-                folder = ensure_folder(store, part, folder["id"])
-            notebook.update(id=previous["id"] if previous else uuid4().hex, created_at=previous["created_at"] if previous else now(), updated_at=now(), repository_id=id, path=relative,
-                            folder_id=previous.get("folder_id", folder["id"]) if previous else folder["id"], cluster_id=previous.get("cluster_id") if previous else None)
-            store.put("notebooks", notebook)
-            save_notebook_file(store, notebook)
-            imported.append(notebook_view(store, notebook))
-        return imported
+        with request.app.state.store.lock:
+            repo = lookup(request, "repositories", id)
+            store = request.app.state.store
+            base = store.directory / "repositories" / id
+            project_id = repo.get("project_id") or DEFAULT_PROJECT
+            with store.connect() as db:
+                previous_rows = db.execute(
+                    "SELECT json_remove(body,'$.cells') FROM documents WHERE kind='notebooks' AND COALESCE(project_id,'default')=? AND json_extract(body,'$.repository_id')=?",
+                    (project_id, id),
+                ).fetchall()
+            existing = {
+                (nb.get("repository_id"), nb.get("path")): nb
+                for nb in (json.loads(row[0]) for row in previous_rows)
+            }
+            imported = []
+            root_folder = repository_folder(store, repo)
+            for path in notebook_paths(base):
+                relative = path.relative_to(base).as_posix()
+                notebook = parse_notebook(path.name, path.read_bytes())
+                previous = existing.get((id, relative))
+                folder = root_folder
+                for part in path.relative_to(base).parent.parts:
+                    folder = ensure_folder(
+                        store,
+                        part,
+                        folder["id"],
+                        project_id=repo.get("project_id") or DEFAULT_PROJECT,
+                    )
+                previous_folder = (
+                    store.get("folders", previous["folder_id"])
+                    if previous and previous.get("folder_id")
+                    else None
+                )
+                preserve_folder = previous and (
+                    not previous.get("folder_id")
+                    or (
+                        previous_folder
+                        and (previous_folder.get("project_id") or DEFAULT_PROJECT)
+                        == project_id
+                    )
+                )
+                notebook.update(
+                    id=previous["id"] if previous else uuid4().hex,
+                    created_at=previous["created_at"] if previous else now(),
+                    updated_at=now(),
+                    repository_id=id,
+                    path=relative,
+                    folder_id=(
+                        previous.get("folder_id", folder["id"])
+                        if preserve_folder
+                        else folder["id"]
+                    ),
+                    cluster_id=previous.get("cluster_id") if previous else None,
+                    project_id=repo.get("project_id") or DEFAULT_PROJECT,
+                    connection_ids=(
+                        previous.get("connection_ids", []) if previous else []
+                    ),
+                    parameter_definitions=(
+                        previous.get("parameter_definitions", []) if previous else []
+                    ),
+                    environment_id=previous.get("environment_id") if previous else None,
+                    version=previous.get("version", 1) + 1 if previous else 1,
+                    imported_commit=repo.get("commit_full") or repo.get("commit"),
+                )
+                store.put("notebooks", notebook)
+                save_notebook_file(store, notebook)
+                record_revision(store, notebook, "Git import", user["id"])
+                imported.append(notebook_view(store, notebook))
+            return imported
 
     @app.get("/api/packages")
     def packages(request: Request, user=Depends(authenticated)):
         return public(request.app.state.store.list("packages"))
 
     @app.post("/api/packages/upload", status_code=201)
-    async def upload_package(request: Request, file: UploadFile = File(...), user=Depends(authenticated)):
+    async def upload_package(
+        request: Request,
+        file: UploadFile = File(...),
+        project_id: str = Form(DEFAULT_PROJECT),
+        user=Depends(authenticated),
+    ):
+        access.require_project(user, project_id, "edit")
         filename = Path(file.filename or "").name
-        if not filename.endswith(".whl") or not re.fullmatch(r"[a-zA-Z0-9_.+-]+\.whl", filename):
+        if not filename.endswith(".whl") or not re.fullmatch(
+            r"[a-zA-Z0-9_.+-]+\.whl", filename
+        ):
             raise ValueError("Upload a Python .whl package")
         content = await limited_upload(file)
+
         def install():
             with request.app.state.runtime.environment_change():
                 path = request.app.state.store.directory / "wheels" / filename
@@ -605,6 +1304,7 @@ def create_app(data_dir=None):
                 temporary.write_bytes(content)
                 temporary.replace(path)
                 return install_wheel(request.app, path, "upload")
+
         return await run_in_threadpool(install)
 
     @app.post("/api/packages/build", status_code=201)
@@ -612,37 +1312,80 @@ def create_app(data_dir=None):
         repo = lookup(request, "repositories", body.repository_id)
         base = request.app.state.store.directory / "repositories" / repo["id"]
         project = confined_path(base, body.path, allow_root=True)
-        if not project.is_dir() or not ((project / "pyproject.toml").is_file() or (project / "setup.py").is_file()):
+        if not project.is_dir() or not (
+            (project / "pyproject.toml").is_file() or (project / "setup.py").is_file()
+        ):
             raise ValueError("Project must contain pyproject.toml or setup.py")
         with request.app.state.runtime.environment_change():
             output = request.app.state.store.directory / "wheels" / uuid4().hex
             output.mkdir()
-            python_path = str(request.app.state.store.directory / "site-packages") + os.pathsep + os.getenv("PYTHONPATH", "")
-            command([sys.executable, "-m", "build", "--wheel", "--no-isolation", "--outdir", str(output), str(project)], timeout=300, extra_env={"PYTHONPATH": python_path})
+            python_path = (
+                str(request.app.state.store.directory / "site-packages")
+                + os.pathsep
+                + os.getenv("PYTHONPATH", "")
+            )
+            command(
+                [
+                    sys.executable,
+                    "-m",
+                    "build",
+                    "--wheel",
+                    "--no-isolation",
+                    "--outdir",
+                    str(output),
+                    str(project),
+                ],
+                timeout=300,
+                extra_env={"PYTHONPATH": python_path},
+            )
             wheels = list(output.glob("*.whl"))
             if not wheels:
                 raise ValueError("Build did not produce a wheel")
-            return [install_wheel(request.app, path, f"{repo['name']}:{body.path}") for path in wheels]
+            return [
+                install_wheel(request.app, path, f"{repo['name']}:{body.path}")
+                for path in wheels
+            ]
 
     @app.get("/api/buckets")
-    def buckets(request: Request, user=Depends(authenticated)):
-        return bucket_views(request.app.state.store)
+    def buckets(
+        request: Request, project_id: str | None = None, user=Depends(authenticated)
+    ):
+        return bucket_views(request.app.state.store, project_scope(user, project_id))
 
     @app.post("/api/buckets", status_code=201)
     def create_bucket(body: BucketInput, request: Request, user=Depends(authenticated)):
         name = bucket_name(body.name)
         store = request.app.state.store
+        access.require_project(user, body.project_id, "edit")
         path = confined_path(store.directory / "buckets", name)
         if path.exists():
             raise HTTPException(409, "Bucket already exists")
         path.mkdir()
-        store.put("buckets", {"id": name, "name": name, "created_at": now()})
+        store.put(
+            "buckets",
+            {
+                "id": name,
+                "name": name,
+                "project_id": body.project_id,
+                "created_at": now(),
+            },
+        )
         return next(bucket for bucket in bucket_views(store) if bucket["name"] == name)
 
     def bucket_path(request, name):
-        path = confined_path(request.app.state.store.directory / "buckets", bucket_name(name))
+        path = confined_path(
+            request.app.state.store.directory / "buckets", bucket_name(name)
+        )
         if not path.is_dir():
             raise HTTPException(404, "Bucket not found")
+        record = request.app.state.store.get("buckets", name) or {
+            "project_id": DEFAULT_PROJECT
+        }
+        access.require_project(
+            authenticated(request),
+            record.get("project_id") or DEFAULT_PROJECT,
+            "read" if request.method == "GET" else "edit",
+        )
         return path
 
     @app.get("/api/buckets/{name}/objects")
@@ -650,24 +1393,40 @@ def create_app(data_dir=None):
         return object_views(bucket_path(request, name))
 
     @app.post("/api/buckets/{name}/objects", status_code=201)
-    async def upload_object(name: str, request: Request, file: UploadFile = File(...), key: str = Form(""), user=Depends(authenticated)):
+    async def upload_object(
+        name: str,
+        request: Request,
+        file: UploadFile = File(...),
+        key: str = Form(""),
+        user=Depends(authenticated),
+    ):
         base = bucket_path(request, name)
         key = key or file.filename or "upload"
         path = confined_path(base, key)
         content = await limited_upload(file)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(content)
-        return {"key": path.relative_to(base).as_posix(), "size": len(content), "modified_at": now()}
+        return {
+            "key": path.relative_to(base).as_posix(),
+            "size": len(content),
+            "modified_at": now(),
+        }
 
     @app.get("/api/buckets/{name}/download")
-    def download_object(name: str, key: str, request: Request, user=Depends(authenticated)):
+    def download_object(
+        name: str, key: str, request: Request, user=Depends(authenticated)
+    ):
         path = confined_path(bucket_path(request, name), key)
         if not path.is_file():
             raise HTTPException(404, "Object not found")
-        return FileResponse(path, media_type="application/octet-stream", filename=path.name)
+        return FileResponse(
+            path, media_type="application/octet-stream", filename=path.name
+        )
 
     @app.delete("/api/buckets/{name}/objects")
-    def delete_object(name: str, key: str, request: Request, user=Depends(authenticated)):
+    def delete_object(
+        name: str, key: str, request: Request, user=Depends(authenticated)
+    ):
         path = confined_path(bucket_path(request, name), key)
         if not path.is_file():
             raise HTTPException(404, "Object not found")
@@ -677,14 +1436,33 @@ def create_app(data_dir=None):
     from .connectors import register_connector_routes
     from .clusters import register_cluster_routes
     from .catalog import register_catalog_routes
-    register_connector_routes(app, authenticated, admin)
+
+    register_project_routes(app, authenticated)
+    register_revision_routes(app, authenticated, access, save_notebook_file)
+    register_connector_routes(app, authenticated, admin, access)
     register_cluster_routes(app, authenticated, admin)
-    register_catalog_routes(app, authenticated, admin)
+    register_catalog_routes(app, authenticated, admin, access)
+    from .workflows import register_workflow_routes
+    from .releases import register_release_routes
+    from .data_workspace import register_data_routes
+    from .operations import register_operation_routes
+    from .notifications import register_notification_routes
+
+    register_workflow_routes(app, authenticated, access)
+    register_release_routes(app, authenticated, access)
+    register_data_routes(app, authenticated, access)
+    register_operation_routes(app, authenticated, admin)
+    register_notification_routes(app, authenticated, admin)
     return app
 
 
 def validated_notebook(body):
+    from .parameters import normalize_definitions
+
     result = body.model_dump()
+    result["parameter_definitions"] = normalize_definitions(
+        result.get("parameter_definitions", [])
+    )
     result["folder_id"] = result.get("folder_id") or None
     result["cluster_id"] = result.get("cluster_id") or None
     result["name"] = result["name"].strip()
@@ -694,7 +1472,10 @@ def validated_notebook(body):
         raise ValueError("Notebook language must be python or sql")
     if result["cells"] is None:
         result["cells"] = [new_cell(result["language"])]
-    if any(cell["language"] not in ("python", "sql", "markdown") for cell in result["cells"]):
+    if any(
+        cell["language"] not in ("python", "sql", "markdown")
+        for cell in result["cells"]
+    ):
         raise ValueError("Supported cell languages: python, sql and markdown")
     if len({cell["id"] for cell in result["cells"]}) != len(result["cells"]):
         raise ValueError("Cell identifiers must be unique")
@@ -704,7 +1485,9 @@ def validated_notebook(body):
 def folder_name(value: str):
     value = value.strip()
     if value in ("", ".", "..") or re.search(r"[\\/\x00-\x1f]", value):
-        raise ValueError("Folder names cannot be empty, contain slashes, or use traversal segments")
+        raise ValueError(
+            "Folder names cannot be empty, contain slashes, or use traversal segments"
+        )
     return value
 
 
@@ -722,7 +1505,13 @@ def folder_breadcrumbs(store, folder_id):
         folder = store.get("folders", folder_id)
         if not folder:
             break
-        result.append({"id": folder["id"], "name": folder["name"], "parent_id": folder.get("parent_id")})
+        result.append(
+            {
+                "id": folder["id"],
+                "name": folder["name"],
+                "parent_id": folder.get("parent_id"),
+            }
+        )
         folder_id = folder.get("parent_id")
     result.reverse()
     names = []
@@ -733,27 +1522,63 @@ def folder_breadcrumbs(store, folder_id):
 
 
 def folder_view(store, folder):
-    return {**public(folder), "path": "/" + "/".join(item["name"] for item in folder_breadcrumbs(store, folder["id"]))}
+    return {
+        **public(folder),
+        "path": "/"
+        + "/".join(item["name"] for item in folder_breadcrumbs(store, folder["id"])),
+    }
 
 
 def notebook_view(store, notebook):
     notebook = public(notebook)
     notebook.setdefault("folder_id", None)
     notebook.setdefault("cluster_id", None)
-    notebook["folder_path"] = "/" + "/".join(item["name"] for item in folder_breadcrumbs(store, notebook.get("folder_id")))
+    notebook.setdefault("project_id", DEFAULT_PROJECT)
+    notebook.setdefault("connection_ids", [])
+    notebook.setdefault("parameter_definitions", [])
+    notebook.setdefault("version", 1)
+    notebook["folder_path"] = "/" + "/".join(
+        item["name"] for item in folder_breadcrumbs(store, notebook.get("folder_id"))
+    )
     return notebook
 
 
 def ensure_folder(store, name, parent_id=None, **extra):
     with store.lock:
-        existing = next((item for item in store.folder_children(parent_id) if item["name"].casefold() == name.casefold()), None)
+        existing = next(
+            (
+                item
+                for item in store.folder_children(
+                    parent_id, [extra.get("project_id") or DEFAULT_PROJECT]
+                )
+                if item["name"].casefold() == name.casefold()
+            ),
+            None,
+        )
         if existing:
             return existing
-        return store.put("folders", {"id": uuid4().hex, "name": folder_name(name), "parent_id": parent_id, "created_at": now(), "updated_at": now(), **extra})
+        return store.put(
+            "folders",
+            {
+                "id": uuid4().hex,
+                "name": folder_name(name),
+                "parent_id": parent_id,
+                "created_at": now(),
+                "updated_at": now(),
+                **extra,
+            },
+        )
 
 
 def repository_folder(store, repo):
-    existing = next((item for item in store.folder_children(None) if item.get("repository_id") == repo["id"]), None)
+    existing = next(
+        (
+            item
+            for item in store.folder_children(None)
+            if item.get("repository_id") == repo["id"]
+        ),
+        None,
+    )
     if existing:
         return existing
     name = re.sub(r"[\\/\x00-\x1f]", "_", repo["name"]).strip()
@@ -764,12 +1589,18 @@ def repository_folder(store, repo):
     while candidate.casefold() in sibling_names:
         candidate = f"{name} ({suffix})"
         suffix += 1
-    return ensure_folder(store, candidate, repository_id=repo["id"])
+    return ensure_folder(
+        store,
+        candidate,
+        repository_id=repo["id"],
+        project_id=repo.get("project_id") or DEFAULT_PROJECT,
+    )
 
 
 def validate_cluster_reference(store, cluster_id):
     if cluster_id:
         from .clusters import cluster_record
+
         cluster_record(store, cluster_id)
 
 
@@ -793,8 +1624,12 @@ def validated_job(body):
             hour, minute = map(int, basic.time.split(":"))
             days = "*"
             if basic.frequency == "weekly":
-                if not basic.days_of_week or any(day not in range(7) for day in basic.days_of_week):
-                    raise ValueError("Choose at least one weekday (Sunday=0 through Saturday=6)")
+                if not basic.days_of_week or any(
+                    day not in range(7) for day in basic.days_of_week
+                ):
+                    raise ValueError(
+                        "Choose at least one weekday (Sunday=0 through Saturday=6)"
+                    )
                 days = ",".join(str(day) for day in sorted(set(basic.days_of_week)))
             values["cron"] = f"{minute} {hour} * * {days}"
         else:
@@ -809,13 +1644,20 @@ def validated_job(body):
 def save_notebook_file(store, notebook):
     path = store.directory / "notebooks" / f"{notebook['id']}.ipynb"
     temporary = path.with_suffix(f".{uuid4().hex}.tmp")
-    temporary.write_text(json.dumps(export_notebook(notebook), indent=2), encoding="utf-8")
+    temporary.write_text(
+        json.dumps(export_notebook(notebook), indent=2), encoding="utf-8"
+    )
     temporary.replace(path)
 
 
 def job_view(app, job):
     entry = app.state.scheduler.get_job(job["id"])
-    return {**public(job), "next_run_at": entry.next_run_time.isoformat() if entry and entry.next_run_time else None}
+    return {
+        **public(job),
+        "next_run_at": (
+            entry.next_run_time.isoformat() if entry and entry.next_run_time else None
+        ),
+    }
 
 
 def schedule(app, job):
@@ -824,24 +1666,36 @@ def schedule(app, job):
         scheduler.remove_job(job["id"])
     if not job["enabled"]:
         return
+
     def execute():
         store = app.state.store
         current = store.get("jobs", job["id"])
-        notebook = store.get("notebooks", job["notebook_id"])
-        if current and current["enabled"] and notebook:
+        if current and current["enabled"]:
             # A schedule never overlaps itself; interactive work shares the same FIFO queue.
             if store.has_active_job(job["id"]):
                 return
-            target = current.get("cluster_id") or notebook.get("cluster_id")
-            extra = {"cluster_id": target} if target else {}
-            app.state.runtime.submit(notebook, trigger="schedule", job_id=job["id"], **extra)
-            current["last_run_at"] = now()
+            try:
+                app.state.workflows.submit_job(current, trigger="schedule")
+                current["last_run_at"] = now()
+                current.pop("last_error", None)
+            except (ValueError, HTTPException) as exc:
+                current["last_error"] = (
+                    exc.detail if isinstance(exc, HTTPException) else str(exc)
+                )
             store.put("jobs", current)
-    scheduler.add_job(execute, cron_trigger(job["cron"], job["timezone"]), id=job["id"], replace_existing=True)
+
+    scheduler.add_job(
+        execute,
+        cron_trigger(job["cron"], job["timezone"]),
+        id=job["id"],
+        replace_existing=True,
+    )
 
 
 def compute(app):
-    memory = psutil.virtual_memory()
+    from .compute import memory_metrics
+
+    memory_total, memory_used = memory_metrics()
     disk = shutil.disk_usage(app.state.store.directory)
     try:
         spark_version = importlib.metadata.version("pyspark")
@@ -850,15 +1704,38 @@ def compute(app):
     runtime = app.state.runtime
     active_count = getattr(runtime, "active_count", 1 if runtime.active_id else 0)
     queued_count = getattr(runtime, "queued_count", runtime.queue.qsize())
-    return {"status": "busy" if active_count else "idle", "hostname": platform.node(), "cpu_count": os.cpu_count() or 1,
-            "memory_total": memory.total, "memory_used": memory.used, "disk_total": disk.total, "disk_used": disk.used,
-            "spark_version": spark_version, "python_version": platform.python_version(), "active_runs": active_count, "queued_runs": queued_count,
-            "uptime_seconds": round(time.monotonic() - app.state.started), "master": os.getenv("SPARK_MASTER", "local[*]")}
+    return {
+        "status": "busy" if active_count else "idle",
+        "hostname": platform.node(),
+        "cpu_count": os.cpu_count() or 1,
+        "memory_total": memory_total,
+        "memory_used": memory_used,
+        "disk_total": disk.total,
+        "disk_used": disk.used,
+        "spark_version": spark_version,
+        "python_version": platform.python_version(),
+        "active_runs": active_count,
+        "queued_runs": queued_count,
+        "uptime_seconds": round(time.monotonic() - app.state.started),
+        "master": os.getenv("SPARK_MASTER", "local[*]"),
+    }
 
 
 def command(args, timeout=120, cwd=None, extra_env=None):
     try:
-        result = subprocess.run(args, cwd=cwd, capture_output=True, text=True, timeout=timeout, env={**os.environ, "GIT_TERMINAL_PROMPT": "0", "GIT_CONFIG_NOSYSTEM": "1", **(extra_env or {})})
+        result = subprocess.run(
+            args,
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            env={
+                **os.environ,
+                "GIT_TERMINAL_PROMPT": "0",
+                "GIT_CONFIG_NOSYSTEM": "1",
+                **(extra_env or {}),
+            },
+        )
     except subprocess.TimeoutExpired:
         raise ValueError(f"Operation exceeded {timeout} seconds")
     if result.returncode:
@@ -868,15 +1745,34 @@ def command(args, timeout=120, cwd=None, extra_env=None):
 
 
 def git(args):
-    return command(["git", "-c", "protocol.file.allow=never", "-c", "protocol.ext.allow=never", "-c", "core.hooksPath=" + os.devnull, *args])
+    return command(
+        [
+            "git",
+            "-c",
+            "protocol.file.allow=never",
+            "-c",
+            "protocol.ext.allow=never",
+            "-c",
+            "core.hooksPath=" + os.devnull,
+            *args,
+        ]
+    )
 
 
 def validate_git_url(url):
     if re.fullmatch(r"git@[A-Za-z0-9.-]+:[A-Za-z0-9_./-]+", url):
         return
     parsed = urlparse(url)
-    if parsed.scheme not in ("https", "ssh") or not parsed.hostname or not parsed.path or parsed.password or (parsed.scheme == "https" and parsed.username):
-        raise ValueError("Use an HTTPS or SSH repository URL without embedded passwords or tokens")
+    if (
+        parsed.scheme not in ("https", "ssh")
+        or not parsed.hostname
+        or not parsed.path
+        or parsed.password
+        or (parsed.scheme == "https" and parsed.username)
+    ):
+        raise ValueError(
+            "Use an HTTPS or SSH repository URL without embedded passwords or tokens"
+        )
 
 
 def notebook_paths(base):
@@ -884,9 +1780,21 @@ def notebook_paths(base):
     for path in base.rglob("*"):
         if len(paths) >= 500:
             break
-        if not path.is_file() or path.is_symlink() or any(part.startswith(".") or part in ("node_modules", "__pycache__", "venv") for part in path.relative_to(base).parts):
+        if (
+            not path.is_file()
+            or path.is_symlink()
+            or any(
+                part.startswith(".") or part in ("node_modules", "__pycache__", "venv")
+                for part in path.relative_to(base).parts
+            )
+        ):
             continue
-        if path.suffix.lower() in (".ipynb", ".sql") or (path.suffix.lower() == ".py" and path.stat().st_size < 10 * 1024 * 1024 and "# Databricks notebook source" in path.read_text(encoding="utf-8", errors="ignore")[:100]):
+        if path.suffix.lower() in (".ipynb", ".sql") or (
+            path.suffix.lower() == ".py"
+            and path.stat().st_size < 10 * 1024 * 1024
+            and "# Databricks notebook source"
+            in path.read_text(encoding="utf-8", errors="ignore")[:100]
+        ):
             confined_path(base, path.relative_to(base).as_posix())
             paths.append(path)
     return paths
@@ -894,6 +1802,7 @@ def notebook_paths(base):
 
 def update_repository_info(repo):
     repo["commit"] = git(["-C", repo["path"], "rev-parse", "--short", "HEAD"])
+    repo["commit_full"] = git(["-C", repo["path"], "rev-parse", "HEAD"])
     repo["notebook_count"] = len(notebook_paths(Path(repo["path"])))
 
 
@@ -909,30 +1818,65 @@ async def limited_upload(file, limit=None):
 
 def idle_runtime(app):
     if app.state.runtime.active_id or not app.state.runtime.queue.empty():
-        raise HTTPException(409, "Wait for queued and running notebooks before changing the shared Python environment")
+        raise HTTPException(
+            409,
+            "Wait for queued and running notebooks before changing the shared Python environment",
+        )
 
 
 def install_wheel(app, path, source):
     try:
         with zipfile.ZipFile(path) as archive:
-            metadata_files = [name for name in archive.namelist() if name.endswith(".dist-info/METADATA")]
+            metadata_files = [
+                name
+                for name in archive.namelist()
+                if name.endswith(".dist-info/METADATA")
+            ]
             if len(metadata_files) != 1:
                 raise ValueError("Wheel must have exactly one package metadata file")
             for member in archive.infolist():
-                confined_path(app.state.store.directory / "site-packages", member.filename)
+                confined_path(
+                    app.state.store.directory / "site-packages", member.filename
+                )
                 if (member.external_attr >> 16) & 0o170000 == 0o120000:
                     raise ValueError("Symbolic links are not allowed in wheel packages")
             if sum(item.file_size for item in archive.infolist()) > 500 * 1024 * 1024:
                 raise ValueError("Expanded wheel exceeds 500 MB")
-            metadata = Parser().parsestr(archive.read(metadata_files[0]).decode("utf-8"))
+            metadata = Parser().parsestr(
+                archive.read(metadata_files[0]).decode("utf-8")
+            )
     except zipfile.BadZipFile:
         raise ValueError("Invalid wheel archive")
     app.state.runtime.reset()
-    command([sys.executable, "-m", "pip", "install", "--no-index", "--no-deps", "--upgrade", "--target", str(app.state.store.directory / "site-packages"), str(path)], timeout=180)
-    entry = {"id": uuid4().hex, "name": metadata.get("Name", path.stem), "version": metadata.get("Version", "unknown"), "filename": path.name,
-             "size": path.stat().st_size, "installed_at": now(), "source": source, "status": "installed"}
+    command(
+        [
+            sys.executable,
+            "-m",
+            "pip",
+            "install",
+            "--no-index",
+            "--no-deps",
+            "--upgrade",
+            "--target",
+            str(app.state.store.directory / "site-packages"),
+            str(path),
+        ],
+        timeout=180,
+    )
+    entry = {
+        "id": uuid4().hex,
+        "name": metadata.get("Name", path.stem),
+        "version": metadata.get("Version", "unknown"),
+        "filename": path.name,
+        "size": path.stat().st_size,
+        "installed_at": now(),
+        "source": source,
+        "status": "installed",
+    }
     for previous in app.state.store.list("packages"):
-        if previous["name"].lower().replace("-", "_") == entry["name"].lower().replace("-", "_"):
+        if previous["name"].lower().replace("-", "_") == entry["name"].lower().replace(
+            "-", "_"
+        ):
             app.state.store.delete("packages", previous["id"])
     app.state.store.put("packages", entry)
     if hasattr(app.state.runtime, "sync_wheel"):
@@ -949,19 +1893,45 @@ def object_views(base):
             except ValueError:
                 continue
             stat = path.stat()
-            entries.append({"key": path.relative_to(base).as_posix(), "size": stat.st_size, "modified_at": datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat()})
+            entries.append(
+                {
+                    "key": path.relative_to(base).as_posix(),
+                    "size": stat.st_size,
+                    "modified_at": datetime.fromtimestamp(
+                        stat.st_mtime, timezone.utc
+                    ).isoformat(),
+                }
+            )
     return sorted(entries, key=lambda item: item["key"])
 
 
-def bucket_views(store):
+def bucket_views(store, project_ids=None):
     result = []
     root = store.directory / "buckets"
     records = {entry["name"]: entry for entry in store.list("buckets")}
     for path in sorted(root.iterdir()):
         if not path.is_dir() or path.is_symlink():
             continue
+        if (
+            project_ids is not None
+            and (records.get(path.name, {}).get("project_id") or DEFAULT_PROJECT)
+            not in project_ids
+        ):
+            continue
         objects = object_views(path)
-        result.append({"name": path.name, "object_count": len(objects), "size": sum(item["size"] for item in objects), "created_at": records.get(path.name, {}).get("created_at", datetime.fromtimestamp(path.stat().st_ctime, timezone.utc).isoformat())})
+        result.append(
+            {
+                "name": path.name,
+                "object_count": len(objects),
+                "size": sum(item["size"] for item in objects),
+                "created_at": records.get(path.name, {}).get(
+                    "created_at",
+                    datetime.fromtimestamp(
+                        path.stat().st_ctime, timezone.utc
+                    ).isoformat(),
+                ),
+            }
+        )
     return result
 
 

@@ -4,6 +4,7 @@ The wire contract follows Unity Catalog 0.7.0's published OpenAPI schema.
 This module registers metadata; Spark/storage readers remain responsible for
 accessing the files at an external table's storage location.
 """
+
 from __future__ import annotations
 
 import json
@@ -17,11 +18,48 @@ from pydantic import BaseModel, Field
 
 API_PREFIX = "/api/2.1/unity-catalog"
 IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,254}$")
-TYPES = {"BOOLEAN", "BYTE", "SHORT", "INT", "LONG", "FLOAT", "DOUBLE", "DATE", "TIMESTAMP", "TIMESTAMP_NTZ", "STRING", "BINARY", "DECIMAL", "ARRAY", "STRUCT", "MAP", "VARIANT", "CHAR", "NULL", "INTERVAL"}
-PRIMITIVE_JSON = {"BOOLEAN": "boolean", "BYTE": "byte", "SHORT": "short", "INT": "integer", "LONG": "long", "FLOAT": "float", "DOUBLE": "double", "DATE": "date", "TIMESTAMP": "timestamp", "TIMESTAMP_NTZ": "timestamp_ntz", "STRING": "string", "BINARY": "binary", "NULL": "void", "VARIANT": "variant"}
+TYPES = {
+    "BOOLEAN",
+    "BYTE",
+    "SHORT",
+    "INT",
+    "LONG",
+    "FLOAT",
+    "DOUBLE",
+    "DATE",
+    "TIMESTAMP",
+    "TIMESTAMP_NTZ",
+    "STRING",
+    "BINARY",
+    "DECIMAL",
+    "ARRAY",
+    "STRUCT",
+    "MAP",
+    "VARIANT",
+    "CHAR",
+    "NULL",
+    "INTERVAL",
+}
+PRIMITIVE_JSON = {
+    "BOOLEAN": "boolean",
+    "BYTE": "byte",
+    "SHORT": "short",
+    "INT": "integer",
+    "LONG": "long",
+    "FLOAT": "float",
+    "DOUBLE": "double",
+    "DATE": "date",
+    "TIMESTAMP": "timestamp",
+    "TIMESTAMP_NTZ": "timestamp_ntz",
+    "STRING": "string",
+    "BINARY": "binary",
+    "NULL": "void",
+    "VARIANT": "variant",
+}
 
 
 class CatalogInput(BaseModel):
+    project_id: str = "default"
     name: str = Field(min_length=1, max_length=255)
     comment: str | None = Field(default=None, max_length=4000)
 
@@ -48,7 +86,9 @@ class TableInput(SchemaInput):
 
 def identifier(value: str):
     if not IDENTIFIER.fullmatch(value):
-        raise ValueError("Catalog, schema, table, and column names must begin with a letter or underscore and contain only letters, numbers, and underscores")
+        raise ValueError(
+            "Catalog, schema, table, and column names must begin with a letter or underscore and contain only letters, numbers, and underscores"
+        )
     return value
 
 
@@ -57,8 +97,17 @@ def catalog_url():
     if not value:
         return None
     parsed = urlsplit(value)
-    if parsed.scheme not in ("http", "https") or not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment:
-        raise ValueError("OPENBRICKS_CATALOG_URL must be an HTTP(S) URL without embedded credentials, a query, or fragment")
+    if (
+        parsed.scheme not in ("http", "https")
+        or not parsed.hostname
+        or parsed.username
+        or parsed.password
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ValueError(
+            "OPENBRICKS_CATALOG_URL must be an HTTP(S) URL without embedded credentials, a query, or fragment"
+        )
     try:
         parsed.port
     except ValueError:
@@ -70,31 +119,55 @@ def catalog_client(base_url):
     token = os.getenv("OPENBRICKS_CATALOG_TOKEN", "").strip()
     headers = {"Authorization": "Bearer " + token} if token else {}
     verify = os.getenv("OPENBRICKS_CATALOG_VERIFY_TLS", "true").lower() == "true"
-    return httpx.Client(base_url=base_url + "/", headers=headers, verify=verify, timeout=httpx.Timeout(15, connect=4), follow_redirects=False)
+    return httpx.Client(
+        base_url=base_url + "/",
+        headers=headers,
+        verify=verify,
+        timeout=httpx.Timeout(15, connect=4),
+        follow_redirects=False,
+    )
 
 
 def catalog_request(method, path, *, params=None, body=None):
     try:
         url = catalog_url()
     except ValueError:
-        raise HTTPException(503, "Unity Catalog URL is invalid. Check the server configuration")
+        raise HTTPException(
+            503, "Unity Catalog URL is invalid. Check the server configuration"
+        )
     if not url:
-        raise HTTPException(503, "Unity Catalog is not configured. Enable the catalog service or set OPENBRICKS_CATALOG_URL")
+        raise HTTPException(
+            503,
+            "Unity Catalog is not configured. Enable the catalog service or set OPENBRICKS_CATALOG_URL",
+        )
     try:
         with catalog_client(url) as client:
-            response = client.request(method, path.lstrip("/"), params=params, json=body)
+            response = client.request(
+                method, path.lstrip("/"), params=params, json=body
+            )
     except httpx.HTTPError:
-        raise HTTPException(502, "Unity Catalog is unavailable. Check that its service is running and reachable")
+        raise HTTPException(
+            502,
+            "Unity Catalog is unavailable. Check that its service is running and reachable",
+        )
     if not response.is_success:
         if response.status_code in (401, 403):
-            raise HTTPException(502, "Unity Catalog authentication or authorization failed. Check its server token and permissions")
+            raise HTTPException(
+                502,
+                "Unity Catalog authentication or authorization failed. Check its server token and permissions",
+            )
         if response.status_code == 404:
             raise HTTPException(404, "Catalog object not found")
         if response.status_code == 409:
             raise HTTPException(409, "A catalog object with this name already exists")
         if response.status_code in (400, 422):
-            raise HTTPException(400, "Unity Catalog rejected the metadata. Check the names, columns, format, and storage location")
-        raise HTTPException(502, f"Unity Catalog request failed (HTTP {response.status_code})")
+            raise HTTPException(
+                400,
+                "Unity Catalog rejected the metadata. Check the names, columns, format, and storage location",
+            )
+        raise HTTPException(
+            502, f"Unity Catalog request failed (HTTP {response.status_code})"
+        )
     try:
         result = response.json()
     except ValueError:
@@ -113,8 +186,16 @@ def collection_response(result, key):
 
 def storage_location(value):
     parsed = urlsplit(value)
-    if parsed.scheme not in ("file", "s3", "s3a", "abfss", "gs") or parsed.username or parsed.password or parsed.query or parsed.fragment:
-        raise ValueError("Use a file://, s3://, s3a://, abfss://, or gs:// storage URI without embedded credentials")
+    if (
+        parsed.scheme not in ("file", "s3", "s3a", "abfss", "gs")
+        or parsed.username
+        or parsed.password
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ValueError(
+            "Use a file://, s3://, s3a://, abfss://, or gs:// storage URI without embedded credentials"
+        )
     if parsed.scheme == "file":
         if parsed.netloc not in ("", "localhost") or not parsed.path.startswith("/"):
             raise ValueError("Local table locations use an absolute file:/// path")
@@ -150,70 +231,177 @@ def table_payload(body: TableInput):
                 decoded = json.loads(type_json)
             except ValueError:
                 raise ValueError("Column type_json must contain valid JSON")
-            if not isinstance(decoded, dict) or decoded.get("name") != column.name or "type" not in decoded:
-                raise ValueError("Column type_json must describe that column's name and type")
+            if (
+                not isinstance(decoded, dict)
+                or decoded.get("name") != column.name
+                or "type" not in decoded
+            ):
+                raise ValueError(
+                    "Column type_json must describe that column's name and type"
+                )
         else:
             json_type = PRIMITIVE_JSON.get(type_name)
             if type_name == "DECIMAL":
-                match = re.fullmatch(r"decimal\(\s*(\d{1,2})\s*,\s*(\d{1,2})\s*\)", column.type_text, flags=re.I)
-                if match and 1 <= int(match[1]) <= 38 and 0 <= int(match[2]) <= int(match[1]):
+                match = re.fullmatch(
+                    r"decimal\(\s*(\d{1,2})\s*,\s*(\d{1,2})\s*\)",
+                    column.type_text,
+                    flags=re.I,
+                )
+                if (
+                    match
+                    and 1 <= int(match[1]) <= 38
+                    and 0 <= int(match[2]) <= int(match[1])
+                ):
                     json_type = f"decimal({int(match[1])},{int(match[2])})"
             if not json_type:
                 raise ValueError("Provide type_json for complex column types")
-            type_json = json.dumps({"name": column.name, "type": json_type, "nullable": column.nullable, "metadata": {}})
-        columns.append({"name": column.name, "type_name": type_name, "type_text": column.type_text,
-                        "type_json": type_json, "position": position, "nullable": column.nullable})
-    return {"name": body.name, "catalog_name": body.catalog_name, "schema_name": body.schema_name, "table_type": "EXTERNAL",
-            "data_source_format": format_name, "storage_location": storage_location(body.storage_location), "columns": columns,
-            **({"comment": body.comment} if body.comment is not None else {})}
+            type_json = json.dumps(
+                {
+                    "name": column.name,
+                    "type": json_type,
+                    "nullable": column.nullable,
+                    "metadata": {},
+                }
+            )
+        columns.append(
+            {
+                "name": column.name,
+                "type_name": type_name,
+                "type_text": column.type_text,
+                "type_json": type_json,
+                "position": position,
+                "nullable": column.nullable,
+            }
+        )
+    return {
+        "name": body.name,
+        "catalog_name": body.catalog_name,
+        "schema_name": body.schema_name,
+        "table_type": "EXTERNAL",
+        "data_source_format": format_name,
+        "storage_location": storage_location(body.storage_location),
+        "columns": columns,
+        **({"comment": body.comment} if body.comment is not None else {}),
+    }
 
 
-def register_catalog_routes(app, authenticated, admin):
+def register_catalog_routes(app, authenticated, admin, access=None):
     @app.get("/api/catalog/status")
-    def status(user=Depends(authenticated)):
+    def status(project_id: str = "default", user=Depends(authenticated)):
+        if access:
+            access.require_project(user, project_id)
         try:
             url = catalog_url()
         except ValueError:
-            return {"configured": True, "available": False, "error": "The catalog server URL is invalid"}
+            return {
+                "configured": True,
+                "available": False,
+                "error": "The catalog server URL is invalid",
+            }
         if not url:
             return {"configured": False, "available": False}
         try:
             catalog_request("GET", "/catalogs", params={"max_results": 1})
         except HTTPException as exc:
-            return {"configured": True, "available": False, "url": url.removesuffix(API_PREFIX), "error": exc.detail}
-        return {"configured": True, "available": True, "url": url.removesuffix(API_PREFIX)}
+            return {
+                "configured": True,
+                "available": False,
+                "url": url.removesuffix(API_PREFIX),
+                "error": exc.detail,
+            }
+        return {
+            "configured": True,
+            "available": True,
+            "url": url.removesuffix(API_PREFIX),
+        }
 
     @app.get("/api/catalog/catalogs")
-    def catalogs(max_results: int = Query(default=100, ge=1, le=1000), page_token: str | None = Query(default=None, max_length=4000), user=Depends(authenticated)):
-        params = {"max_results": max_results, **({"page_token": page_token} if page_token else {})}
-        return collection_response(catalog_request("GET", "/catalogs", params=params), "catalogs")
+    def catalogs(
+        project_id: str = "default",
+        max_results: int = Query(default=100, ge=1, le=1000),
+        page_token: str | None = Query(default=None, max_length=4000),
+        user=Depends(authenticated),
+    ):
+        if access:
+            access.require_project(user, project_id)
+        params = {
+            "max_results": max_results,
+            **({"page_token": page_token} if page_token else {}),
+        }
+        return collection_response(
+            catalog_request("GET", "/catalogs", params=params), "catalogs"
+        )
 
     @app.post("/api/catalog/catalogs", status_code=201)
     def create_catalog(body: CatalogInput, user=Depends(admin)):
+        if access:
+            access.require_project(user, body.project_id, "manage")
         identifier(body.name)
-        return catalog_request("POST", "/catalogs", body=body.model_dump(exclude_none=True))
+        return catalog_request(
+            "POST",
+            "/catalogs",
+            body=body.model_dump(exclude_none=True, exclude={"project_id"}),
+        )
 
     @app.get("/api/catalog/schemas")
-    def schemas(catalog_name: str, max_results: int = Query(default=100, ge=1, le=1000), page_token: str | None = Query(default=None, max_length=4000), user=Depends(authenticated)):
+    def schemas(
+        catalog_name: str,
+        project_id: str = "default",
+        max_results: int = Query(default=100, ge=1, le=1000),
+        page_token: str | None = Query(default=None, max_length=4000),
+        user=Depends(authenticated),
+    ):
+        if access:
+            access.require_project(user, project_id)
         identifier(catalog_name)
-        params = {"catalog_name": catalog_name, "max_results": max_results, **({"page_token": page_token} if page_token else {})}
-        return collection_response(catalog_request("GET", "/schemas", params=params), "schemas")
+        params = {
+            "catalog_name": catalog_name,
+            "max_results": max_results,
+            **({"page_token": page_token} if page_token else {}),
+        }
+        return collection_response(
+            catalog_request("GET", "/schemas", params=params), "schemas"
+        )
 
     @app.post("/api/catalog/schemas", status_code=201)
     def create_schema(body: SchemaInput, user=Depends(admin)):
+        if access:
+            access.require_project(user, body.project_id, "manage")
         identifier(body.name)
         identifier(body.catalog_name)
-        return catalog_request("POST", "/schemas", body=body.model_dump(exclude_none=True))
+        return catalog_request(
+            "POST",
+            "/schemas",
+            body=body.model_dump(exclude_none=True, exclude={"project_id"}),
+        )
 
     @app.get("/api/catalog/tables")
-    def tables(catalog_name: str, schema_name: str, max_results: int = Query(default=25, ge=1, le=50), page_token: str | None = Query(default=None, max_length=4000), user=Depends(authenticated)):
+    def tables(
+        catalog_name: str,
+        schema_name: str,
+        project_id: str = "default",
+        max_results: int = Query(default=25, ge=1, le=50),
+        page_token: str | None = Query(default=None, max_length=4000),
+        user=Depends(authenticated),
+    ):
+        if access:
+            access.require_project(user, project_id)
         identifier(catalog_name)
         identifier(schema_name)
-        params = {"catalog_name": catalog_name, "schema_name": schema_name, "max_results": max_results, **({"page_token": page_token} if page_token else {})}
-        return collection_response(catalog_request("GET", "/tables", params=params), "tables")
+        params = {
+            "catalog_name": catalog_name,
+            "schema_name": schema_name,
+            "max_results": max_results,
+            **({"page_token": page_token} if page_token else {}),
+        }
+        return collection_response(
+            catalog_request("GET", "/tables", params=params), "tables"
+        )
 
     @app.get("/api/catalog/tables/{full_name}")
-    def table(full_name: str, user=Depends(authenticated)):
+    def table(full_name: str, project_id: str = "default", user=Depends(authenticated)):
+        if access:
+            access.require_project(user, project_id)
         parts = full_name.split(".")
         if len(parts) != 3:
             raise ValueError("Use a three-part catalog.schema.table name")
@@ -223,4 +411,6 @@ def register_catalog_routes(app, authenticated, admin):
 
     @app.post("/api/catalog/tables", status_code=201)
     def create_table(body: TableInput, user=Depends(admin)):
+        if access:
+            access.require_project(user, body.project_id, "manage")
         return catalog_request("POST", "/tables", body=table_payload(body))

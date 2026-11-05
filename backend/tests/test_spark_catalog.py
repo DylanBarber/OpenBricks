@@ -18,15 +18,45 @@ def catalog_env(tmp_path, monkeypatch):
     monkeypatch.setenv("OPENBRICKS_CATALOG_TOKEN", "catalog-test-token")
     monkeypatch.setenv("OPENBRICKS_CATALOG_JAR_DIR", str(tmp_path))
     monkeypatch.delenv("OPENBRICKS_S3_ENDPOINT", raising=False)
-    for name in ("unitycatalog-spark_4.0_2.13-0.7.0.jar", "delta-spark_4.0_2.13-4.3.1.jar", "delta-storage-4.3.1.jar"):
+    for name in (
+        "unitycatalog-spark_4.0_2.13-0.7.0.jar",
+        "delta-spark_4.0_2.13-4.3.1.jar",
+        "delta-storage-4.3.1.jar",
+    ):
         (tmp_path / name).write_bytes(b"fixture")
     return tmp_path
 
 
-def test_disabled_catalog_does_not_change_spark_defaults(monkeypatch):
+def test_disabled_catalog_enables_packaged_delta_without_changing_default_catalog(
+    tmp_path, monkeypatch
+):
     monkeypatch.delenv("OPENBRICKS_CATALOG_URL", raising=False)
+    monkeypatch.delenv("OPENBRICKS_S3_ENDPOINT", raising=False)
+    monkeypatch.setenv("OPENBRICKS_CATALOG_JAR_DIR", str(tmp_path))
+    for name in ("delta-spark_4.0_2.13-4.3.1.jar", "mssql-jdbc-13.6.0.jre11.jar"):
+        (tmp_path / name).write_bytes(b"fixture")
     builder = Builder()
-    assert configure_catalog(builder) is builder and builder.values == {}
+    assert configure_catalog(builder) is builder
+    assert len(builder.values["spark.jars"].split(",")) == 2
+    assert (
+        builder.values["spark.sql.extensions"]
+        == "io.delta.sql.DeltaSparkSessionExtension"
+    )
+    assert (
+        builder.values["spark.sql.catalog.spark_catalog"]
+        == "org.apache.spark.sql.delta.catalog.DeltaCatalog"
+    )
+    assert "spark.sql.defaultCatalog" not in builder.values
+    assert not any(key.endswith((".uri", ".auth.token")) for key in builder.values)
+
+
+def test_source_environment_without_packaged_jars_can_still_use_plain_spark(
+    tmp_path, monkeypatch
+):
+    monkeypatch.delenv("OPENBRICKS_CATALOG_URL", raising=False)
+    monkeypatch.delenv("OPENBRICKS_S3_ENDPOINT", raising=False)
+    monkeypatch.setenv("OPENBRICKS_CATALOG_JAR_DIR", str(tmp_path))
+    assert configure_catalog(Builder()).values == {}
 
 
 def test_catalog_uses_local_jars_and_preserves_default_hive(catalog_env, monkeypatch):
@@ -39,17 +69,24 @@ def test_catalog_uses_local_jars_and_preserves_default_hive(catalog_env, monkeyp
     assert values["spark.sql.catalog.analytics.uri"] == "http://catalog:8080"
     assert values["spark.sql.catalog.analytics.auth.type"] == "static"
     assert values["spark.sql.catalog.analytics.auth.token"] == "catalog-test-token"
-    assert values["spark.sql.catalog.spark_catalog"] == "org.apache.spark.sql.delta.catalog.DeltaCatalog"
+    assert (
+        values["spark.sql.catalog.spark_catalog"]
+        == "org.apache.spark.sql.delta.catalog.DeltaCatalog"
+    )
 
 
-def test_catalog_rejects_missing_jars_invalid_names_and_api_suffix(catalog_env, monkeypatch):
+def test_catalog_rejects_missing_jars_invalid_names_and_api_suffix(
+    catalog_env, monkeypatch
+):
     monkeypatch.setenv("OPENBRICKS_CATALOG_NAMES", "spark_catalog")
     with pytest.raises(ValueError, match="cannot replace"):
         configure_catalog(Builder())
     monkeypatch.setenv("OPENBRICKS_CATALOG_NAMES", "bad.name")
     with pytest.raises(ValueError, match="Catalog names"):
         configure_catalog(Builder())
-    monkeypatch.setenv("OPENBRICKS_CATALOG_URL", "http://catalog:8080/api/2.1/unity-catalog")
+    monkeypatch.setenv(
+        "OPENBRICKS_CATALOG_URL", "http://catalog:8080/api/2.1/unity-catalog"
+    )
     with pytest.raises(ValueError, match="base URL"):
         configure_catalog(Builder())
     monkeypatch.setenv("OPENBRICKS_CATALOG_URL", "http://catalog:8080")
@@ -69,14 +106,20 @@ def test_s3a_settings_and_runtime_attach(catalog_env, monkeypatch):
     assert values["spark.hadoop.fs.s3a.path.style.access"] == "true"
     assert values["spark.hadoop.fs.s3a.connection.ssl.enabled"] == "false"
     assert values["spark.hadoop.fs.s3a.secret.key"] == "test-secret"
+
     class Conf:
         def __init__(self):
             self.values = {}
+
         def set(self, key, value):
             self.values[key] = value
+
     class Spark:
         conf = Conf()
+
     spark = Spark()
     helper = SparkCatalogHelper(lambda: spark)
     assert helper.attach("new_catalog") == {"catalog": "new_catalog", "attached": True}
-    assert spark.conf.values["spark.sql.catalog.new_catalog.uri"] == "http://catalog:8080"
+    assert (
+        spark.conf.values["spark.sql.catalog.new_catalog.uri"] == "http://catalog:8080"
+    )

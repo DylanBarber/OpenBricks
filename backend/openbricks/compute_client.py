@@ -16,9 +16,10 @@ import httpx
 from .clusters import RuntimeBusy, client_for, cluster_record, ensure_local_cluster, timestamp as now
 
 
-def connection_snapshot(store):
+def connection_snapshot(store, notebook=None):
     from .connectors import connections_for_runtime
-    return connections_for_runtime(store)
+    notebook = notebook or {}
+    return connections_for_runtime(store, project_id=notebook.get("project_id", "default"), connection_ids=notebook.get("connection_ids", []))
 
 
 def pending_runs(store, cluster_id=None):
@@ -56,6 +57,7 @@ class ClusterRuntime:
         self.threads = {}
         self._active = {}
         self._run_locks = {}
+        self._connection_snapshots = {}
         self.queue = QueueView(self)
         self.started = False
         self._timeout = int(os.getenv("OPENBRICKS_RUN_TIMEOUT", "3600"))
@@ -107,13 +109,21 @@ class ClusterRuntime:
                 continue
             self._enqueue(run)
 
-    def submit(self, notebook, cell_id=None, trigger="manual", job_id=None, cluster_id=None):
+    def submit(self, notebook, cell_id=None, trigger="manual", job_id=None, cluster_id=None, parameters=None, timeout_seconds=None, environment_id=None, environment=None, provenance=None, run_id=None, connections=None):
         selected = cluster_id or notebook.get("cluster_id") or "local"
         with self.state_lock:
+            if self.stopped.is_set():
+                raise RuntimeBusy("Compute routing is stopping; try again after maintenance")
+            if run_id and self.store.get("runs", run_id):
+                previous = self.store.get("runs", run_id)
+                if previous["notebook_id"] != notebook["id"]:
+                    raise ValueError("Run identifier belongs to another notebook")
+                return previous
             if self.environment_busy and trigger != "schedule":
                 raise RuntimeBusy("The shared Python environment is being updated. Try again when the package operation finishes")
             if self.local_engine and selected == "local":
-                return self.local_engine.submit(notebook, cell_id, trigger, job_id, cluster_id="local")
+                return self.local_engine.submit(notebook, cell_id, trigger, job_id, cluster_id="local", parameters=parameters,
+                    timeout_seconds=timeout_seconds, environment_id=environment_id, environment=environment, provenance=provenance, run_id=run_id, connections=connections)
             entry = cluster_record(self.store, selected)
             if not entry.get("url"):
                 raise ValueError("The selected compute cluster has no service endpoint")
@@ -121,13 +131,30 @@ class ClusterRuntime:
                 raise ValueError("Cell not found")
             if len(pending_runs(self.store, selected)) >= 100:
                 raise RuntimeBusy("The selected cluster's run queue is full")
-            run = {"id": uuid4().hex, "notebook_id": notebook["id"], "notebook_name": notebook["name"],
+            from .parameters import resolve_parameters
+            from .environments import capture_environment, get_environment, validate_manifest
+            project_id = notebook.get("project_id", "default")
+            values = resolve_parameters(notebook.get("parameter_definitions", []), parameters)
+            seconds = self._timeout if timeout_seconds is None else timeout_seconds
+            if isinstance(seconds, bool) or not isinstance(seconds, int) or not 1 <= seconds <= 86_400:
+                raise ValueError("Run timeout must be between 1 and 86400 seconds")
+            manifest = validate_manifest(environment) if environment is not None else (get_environment(self.store, environment_id, project_id) if environment_id else capture_environment(self.store, project_id))
+            from .execution import notebook_provenance
+            if self.stopped.is_set():
+                raise RuntimeBusy("Compute routing is stopping; try again after maintenance")
+            run = {"id": run_id or uuid4().hex, "notebook_id": notebook["id"], "notebook_name": notebook["name"],
                    "cluster_id": selected, "cluster_name": entry["name"], "trigger": trigger, "job_id": job_id,
                    "status": "queued", "created_at": now(), "started_at": None, "finished_at": None,
                    "duration_ms": None, "outputs": [], "error": None,
                    "_notebook": {key: value for key, value in notebook.items() if not key.startswith("_")},
-                   "_cell_id": cell_id}
+                   "_cell_id": cell_id, "project_id": project_id, "parameters": values, "timeout_seconds": seconds,
+                   "connection_ids": notebook.get("connection_ids", []), "data_execution_id": notebook.get("data_execution_id"),
+                   "environment_id": manifest["id"], "_environment": manifest,
+                   "provenance": {**notebook_provenance(notebook), **(provenance or {}), "environment_id": manifest["id"]},
+                   "logs": [], "progress": {"total_cells": len(notebook["cells"])}, "peak_memory_bytes": 0, "error_class": None}
             self.store.put("runs", run)
+            if connections is not None:
+                self._connection_snapshots[run["id"]] = connections
             self._enqueue(run)
             return run
 
@@ -201,7 +228,18 @@ class ClusterRuntime:
                     digest.update(chunk)
             yield path, digest.hexdigest()
 
-    def _sync_packages(self, entry):
+    def _sync_packages(self, entry, manifest=None):
+        if manifest is not None:
+            if entry.get("_shared_data"):
+                return
+            from .environments import artifact_path
+            with client_for(self.store, entry) as client:
+                for item in manifest["wheels"]:
+                    path = artifact_path(self.store.directory, item)
+                    with path.open("rb") as stream:
+                        response = client.post("/artifacts/wheels", data={"sha256": item["sha256"]}, files={"file": (path.name, stream, "application/octet-stream")}, timeout=180)
+                    response.raise_for_status()
+            return
         if entry.get("_shared_data"):
             return
         wheels = list(self._installed_wheels())
@@ -240,6 +278,7 @@ class ClusterRuntime:
             finally:
                 with self.state_lock:
                     self._active.pop(selected, None)
+                    self._connection_snapshots.pop(run_id, None)
                 work.task_done()
 
     def _execute(self, run, selected):
@@ -249,10 +288,16 @@ class ClusterRuntime:
             # A restarted control plane must reattach without attempting to
             # alter an environment while the agent's old run is still active.
             if not run.get("_remote_submitted"):
-                self._sync_packages(entry)
-            connections = connection_snapshot(self.store)
+                self._sync_packages(entry, run.get("_environment"))
+            connections = []
+            if not run.get("_remote_submitted"):
+                connections = self._connection_snapshots.get(run_id)
+                if connections is None:
+                    connections = connection_snapshot(self.store, run["_notebook"])
             payload = {"run_id": run_id, "notebook": run["_notebook"], "cell_id": run.get("_cell_id"),
-                       "trigger": run["trigger"], "job_id": run.get("job_id"), "connections": connections}
+                       "trigger": run["trigger"], "job_id": run.get("job_id"), "connections": connections,
+                       "parameters": run.get("parameters", {}), "timeout_seconds": run.get("timeout_seconds", self._timeout),
+                       "environment": run.get("_environment"), "provenance": run.get("provenance", {})}
             with client_for(self.store, entry) as client:
                 with self.state_lock:
                     run_lock = self._run_locks.setdefault(run_id, threading.RLock())
@@ -287,7 +332,7 @@ class ClusterRuntime:
                 # No connection secrets are retained in durable run metadata.
                 payload.clear()
                 connections = None
-                deadline = time.monotonic() + self._timeout + 120
+                deadline = time.monotonic() + run.get("timeout_seconds", self._timeout) + 120
                 while not self.stopped.is_set():
                     try:
                         response = client.get(f"/runs/{run_id}")
@@ -314,13 +359,24 @@ class ClusterRuntime:
                         latest = self.store.get("runs", run_id)
                         if not latest or latest["status"] == "cancelled":
                             return
-                        for field in ("status", "started_at", "finished_at", "duration_ms", "outputs", "error"):
+                        for field in ("status", "started_at", "finished_at", "duration_ms", "outputs", "error", "logs", "progress", "peak_memory_bytes", "error_class", "data_result", "quality_reports", "lineage", "data_events"):
                             if field in remote:
                                 run[field] = remote[field]
+                        if remote.get("created_at"):
+                            run["compute_created_at"] = remote["created_at"]
                         run["error"] = remote.get("error")
                         if run["status"] == "running":
                             self._active[selected] = run_id
                         self.store.put("runs", run)
+                        try:
+                            from .data_workspace import persist_data_event, finalize_data_run
+                        except ImportError:
+                            pass
+                        else:
+                            for event in run.get("data_events", []):
+                                persist_data_event(self.store, run, event)
+                            if run["status"] not in ("queued", "running"):
+                                finalize_data_run(self.store, run)
                     if run["status"] not in ("queued", "running"):
                         return
                     if time.monotonic() > deadline:
@@ -340,6 +396,8 @@ class ClusterRuntime:
                     return
                 message = str(exc) if isinstance(exc, (RuntimeBusy, ValueError)) and not isinstance(exc, httpx.HTTPError) else "Compute service could not complete the request. Check cluster connectivity and authentication, then retry the notebook"
                 run.update(status="failed", finished_at=now(), error=message)
+                from .execution import classify_error
+                run["error_class"] = classify_error(message)
                 self.store.put("runs", run)
 
     def cancel(self, run_id):
@@ -378,6 +436,8 @@ class ClusterRuntime:
 
     def close(self):
         self.stopped.set()
+        with self.state_lock:
+            pass
         self.environment_ready.set()
         if self.local_engine:
             self.local_engine.close()

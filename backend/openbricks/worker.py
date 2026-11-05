@@ -30,9 +30,10 @@ _scopes: dict[str, dict[str, Any]] = {}
 
 
 class CappedOutput(io.StringIO):
-    def __init__(self):
+    def __init__(self, callback=None):
         super().__init__()
         self.truncated = False
+        self.callback = callback
 
     def write(self, value: str) -> int:
         remaining = MAX_OUTPUT - self.tell()
@@ -40,6 +41,8 @@ class CappedOutput(io.StringIO):
             self.truncated = True
         if remaining > 0:
             super().write(value[:remaining])
+            if self.callback:
+                self.callback(value[:remaining])
         return len(value)
 
     def text(self) -> str:
@@ -118,9 +121,16 @@ def table(value: Any) -> dict | None:
     return None
 
 
-def execute_cell(cell: dict, scope: dict, data_dir: str) -> dict:
+def execute_cell(cell: dict, scope: dict, data_dir: str, on_log=None, redactor=None) -> dict:
     started = time.monotonic()
-    stdout, stderr = CappedOutput(), CappedOutput()
+    from .execution import Redactor, StreamRedactor
+    redactor = redactor or Redactor()
+    streams = {name: StreamRedactor(redactor) for name in ("stdout", "stderr")}
+    def stream(name, value="", final=False):
+        safe = streams[name].feed(value, final=final)
+        if safe and on_log:
+            on_log(name, safe)
+    stdout, stderr = CappedOutput(lambda value: stream("stdout", value)), CappedOutput(lambda value: stream("stderr", value))
     output = {"cell_id": cell["id"], "status": "succeeded", "stdout": "", "stderr": "", "result": None, "duration_ms": 0}
 
     def display(value: Any) -> None:
@@ -157,7 +167,11 @@ def execute_cell(cell: dict, scope: dict, data_dir: str) -> dict:
             output["status"] = "failed"
             traceback.print_exc(file=stderr)
     output.update(stdout=stdout.text(), stderr=stderr.text(), duration_ms=round((time.monotonic() - started) * 1000))
-    return output
+    stream("stdout", final=True)
+    stream("stderr", final=True)
+    safe = redactor.clean(output)
+    safe.update(cell_id=output["cell_id"], status=output["status"])
+    return safe
 
 
 def run_request(request: dict, emit) -> None:
@@ -179,15 +193,47 @@ def run_request(request: dict, emit) -> None:
         _scopes[notebook_id] = {"__name__": "__main__", "spark": SparkProxy(data_dir),
             "sc": ContextProxy(data_dir), "blob": blob, "dbutils": SimpleNamespace(fs=LocalFS(blob))}
     scope = _scopes[notebook_id]
+    from .parameters import Widgets
+    parameters = request.get("parameters", {})
+    scope["params"] = dict(parameters)
+    widgets = getattr(scope["dbutils"], "widgets", None)
+    if widgets is None:
+        widgets = Widgets(parameters)
+        scope["dbutils"].widgets = widgets
+    else:
+        from .parameters import widget_text
+        widgets.values.update({name: widget_text(value) for name, value in parameters.items()})
     # Connections refresh per request, so edits and revocations apply to the
     # next cell without persisting plaintext credentials in notebook files.
     from .connectors import ConnectionRegistry
     scope["connections"] = ConnectionRegistry(request.get("connections", []))
     from .spark_catalog import SparkCatalogHelper
     scope["catalog"] = SparkCatalogHelper(lambda: spark_session(data_dir))
+    from .execution import Redactor
+    redactor = Redactor(request.get("connections", []))
+    raw_emit = emit
+    emit = lambda event: raw_emit(redactor.event(event))
+    try:
+        from .data_workspace import ComputeDataWorkspace
+    except ImportError:
+        pass
+    else:
+        scope["data"] = ComputeDataWorkspace(lambda: spark_session(data_dir), scope["connections"], scope["blob"], emit, run_id, project_id=request.get("project_id", "default"))
     error = None
-    for cell in request["cells"]:
-        output = execute_cell(cell, scope, data_dir)
+    for index, cell in enumerate(request["cells"]):
+        emit({"type": "progress", "run_id": run_id, "cell_id": cell["id"], "cell_index": index, "total_cells": len(request["cells"])})
+        pending_logs, last_log = {"stdout": "", "stderr": ""}, [0.0]
+        def on_log(stream, text, final=False):
+            pending_logs[stream] += text
+            if not final and time.monotonic() - last_log[0] < 0.1 and len(pending_logs[stream]) < 4096:
+                return
+            value, pending_logs[stream] = pending_logs[stream], ""
+            for offset in range(0, len(value), 8192):
+                emit({"type": "log", "run_id": run_id, "cell_id": cell["id"], "stream": stream, "text": value[offset:offset + 8192]})
+            last_log[0] = time.monotonic()
+        output = execute_cell(cell, scope, data_dir, on_log=on_log, redactor=redactor)
+        for stream in pending_logs:
+            on_log(stream, "", final=True)
         emit({"type": "cell", "run_id": run_id, "output": output})
         if output["status"] == "failed":
             error = output["stderr"]
@@ -212,7 +258,8 @@ def main() -> None:
                 request = json.loads(line)
                 run_request(request, emit)
             except BaseException:
-                emit({"type": "done", "run_id": request.get("run_id"), "status": "failed", "error": traceback.format_exc()})
+                from .execution import Redactor
+                emit(Redactor(request.get("connections", [])).event({"type": "done", "run_id": request.get("run_id"), "status": "failed", "error": traceback.format_exc()}))
     finally:
         if _spark is not None:
             _spark.stop()

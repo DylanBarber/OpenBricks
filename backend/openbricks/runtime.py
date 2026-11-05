@@ -10,6 +10,7 @@ import subprocess
 import sys
 import threading
 import time
+import psutil
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -40,20 +41,25 @@ class LocalRuntime:
         self.last_activity = time.monotonic()
         self.log = None
         self._connection_snapshots = {}
+        self.current_environment = None
+        self.current_project = None
         for run in self.store.active_runs():
             if run["status"] in ("queued", "running") and run.get("cluster_id", "local") == "local":
-                run.update(status="failed", finished_at=now(), error="Server restarted before this run completed. Run it again to start a new session.")
+                run.update(error_class="unknown_outcome" if run["status"] == "running" else "restart", status="failed", finished_at=now(),
+                    error="Compute restarted before this run completed. Inspect any prior writes before starting a new attempt.")
                 self.store.put("runs", run)
         self.thread = threading.Thread(target=self._loop, daemon=True, name="openbricks-run-queue")
 
     def start(self):
         self.thread.start()
 
-    def submit(self, notebook, cell_id=None, trigger="manual", job_id=None, cluster_id=None, run_id=None, connections=None):
+    def submit(self, notebook, cell_id=None, trigger="manual", job_id=None, cluster_id=None, run_id=None, connections=None, parameters=None, timeout_seconds=None, environment_id=None, environment=None, provenance=None):
         with self.state_lock:
+            if self.stopping:
+                raise RuntimeBusy("Compute is stopping; try again after maintenance")
             if self.environment_busy and trigger != "schedule":
                 raise RuntimeBusy("The shared Python environment is being updated. Try running again when the package operation finishes")
-            return self._submit(notebook, cell_id, trigger, job_id, cluster_id, run_id, connections)
+            return self._submit(notebook, cell_id, trigger, job_id, cluster_id, run_id, connections, parameters, timeout_seconds, environment_id, environment, provenance)
 
     @contextmanager
     def environment_change(self):
@@ -69,7 +75,7 @@ class LocalRuntime:
                 self.environment_busy = False
                 self.environment_ready.set()
 
-    def _submit(self, notebook, cell_id=None, trigger="manual", job_id=None, cluster_id=None, run_id=None, connections=None):
+    def _submit(self, notebook, cell_id=None, trigger="manual", job_id=None, cluster_id=None, run_id=None, connections=None, parameters=None, timeout_seconds=None, environment_id=None, environment=None, provenance=None):
         if run_id:
             previous = self.store.get("runs", run_id)
             if previous:
@@ -82,11 +88,24 @@ class LocalRuntime:
                 raise ValueError("Cell not found")
         else:
             cells = notebook["cells"]
+        from .parameters import resolve_parameters
+        from .environments import capture_environment, get_environment, validate_manifest
+        project_id = notebook.get("project_id", "default")
+        values = resolve_parameters(notebook.get("parameter_definitions", []), parameters)
+        seconds = self.timeout if timeout_seconds is None else timeout_seconds
+        if isinstance(seconds, bool) or not isinstance(seconds, int) or not 1 <= seconds <= 86_400:
+            raise ValueError("Run timeout must be between 1 and 86400 seconds")
+        manifest = validate_manifest(environment) if environment is not None else (get_environment(self.store, environment_id, project_id) if environment_id else capture_environment(self.store, project_id))
+        from .execution import notebook_provenance
         if self.queue.qsize() >= 100:
             raise ValueError("Run queue is full; wait for a run to finish")
         run = {"id": run_id or uuid4().hex, "notebook_id": notebook["id"], "notebook_name": notebook["name"], "cluster_id": cluster_id or "local", "cluster_name": "Local compute", "status": "queued", "trigger": trigger,
                "job_id": job_id, "created_at": now(), "started_at": None, "finished_at": None, "duration_ms": None, "outputs": [], "error": None,
-               "_cells": cells, "_reset_scope": not bool(cell_id)}
+               "_cells": cells, "_reset_scope": not bool(cell_id), "_notebook": notebook, "_cell_id": cell_id,
+               "project_id": project_id, "connection_ids": notebook.get("connection_ids", []),
+               "data_execution_id": notebook.get("data_execution_id"),
+               "parameters": values, "timeout_seconds": seconds, "environment_id": manifest["id"], "_environment": manifest,
+               "provenance": {**notebook_provenance(notebook), **(provenance or {}), "environment_id": manifest["id"]}, "logs": [], "progress": {"total_cells": len(cells)}, "peak_memory_bytes": 0, "error_class": None}
         self.store.put("runs", run)
         if connections is not None:
             self._connection_snapshots[run["id"]] = connections
@@ -130,14 +149,18 @@ class LocalRuntime:
                 self.log.close()
                 self.log = None
 
-    def _get_process(self):
+    def _get_process(self, package_dir=None, environment_id=None, project_id="default"):
         with self.process_lock:
+            if self.current_environment != environment_id or self.current_project != project_id:
+                self.reset()
+                self.current_environment = environment_id
+                self.current_project = project_id
             if self.process and self.process.poll() is None:
                 return self.process
             log_dir = self.store.directory / "logs"
             log_dir.mkdir(exist_ok=True)
             self.log = (log_dir / "worker.log").open("a", encoding="utf-8")
-            python_paths = [str(self.store.directory / "site-packages"), *[str(self.store.directory / "repositories" / repo["id"]) for repo in self.store.list("repositories")]]
+            python_paths = [str(package_dir or self.store.directory / "site-packages")]
             if os.getenv("PYTHONPATH"):
                 python_paths.append(os.environ["PYTHONPATH"])
             env = {**os.environ, "PYTHONUNBUFFERED": "1", "DATA_DIR": str(self.store.directory), "SPARK_LOCAL_IP": "127.0.0.1", "PYTHONPATH": os.pathsep.join(python_paths)}
@@ -165,22 +188,48 @@ class LocalRuntime:
                     self.store.put("runs", run)
                 started = time.monotonic()
                 expired = threading.Event()
-                def timeout():
+                sample_stop = threading.Event()
+                def sample_memory(run=run, sample_stop=sample_stop, run_id=run_id):
+                    last_saved = 0.0
+                    while not sample_stop.wait(0.25):
+                        process = self.process
+                        if process:
+                            try:
+                                parent = psutil.Process(process.pid)
+                                total = parent.memory_info().rss
+                                for child in parent.children(recursive=True):
+                                    try:
+                                        total += child.memory_info().rss
+                                    except psutil.Error:
+                                        pass
+                                run["peak_memory_bytes"] = max(run.get("peak_memory_bytes", 0), total)
+                                if time.monotonic() - last_saved >= 1:
+                                    with self.state_lock:
+                                        if self.active_id == run_id and run_id not in self.cancelled and run["status"] == "running":
+                                            self.store.put("runs", run)
+                                    last_saved = time.monotonic()
+                            except psutil.Error:
+                                pass
+                sampler = threading.Thread(target=sample_memory, daemon=True, name="openbricks-memory-sampler")
+                sampler.start()
+                def timeout(target_id=run_id, target_run=run, expiry=expired):
                     with self.state_lock:
-                        if self.active_id == run_id:
-                            expired.set()
+                        if self.active_id == target_id and target_run["status"] == "running" and target_id not in self.cancelled:
+                            expiry.set()
                             self.reset()
-                timer = threading.Timer(self.timeout, timeout)
+                timer = threading.Timer(run.get("timeout_seconds", self.timeout), timeout)
                 timer.daemon = True
                 timer.start()
                 try:
+                    from .environments import prepare_environment
+                    package_dir = prepare_environment(self.store.directory, run["_environment"])
                     with self.state_lock:
-                        if self.stopping or run_id in self.cancelled:
+                        if self.stopping or run_id in self.cancelled or expired.is_set():
                             raise RuntimeError("Cancelled before execution")
-                        process = self._get_process()
+                        process = self._get_process(package_dir, run["environment_id"], run["project_id"])
                         request = {"run_id": run_id, "notebook_id": run["notebook_id"], "cells": run["_cells"], "reset_scope": run["_reset_scope"],
-                                   "data_dir": str(self.store.directory), "package_dir": str(self.store.directory / "site-packages"),
-                                   "repository_paths": [str(self.store.directory / "repositories" / repo["id"]) for repo in self.store.list("repositories")]}
+                                   "data_dir": str(self.store.directory), "package_dir": str(package_dir), "repository_paths": [],
+                                   "parameters": run["parameters"], "project_id": run["project_id"]}
                         if run_id in self._connection_snapshots:
                             request["connections"] = self._connection_snapshots[run_id]
                         else:
@@ -189,7 +238,9 @@ class LocalRuntime:
                             except ImportError:
                                 request["connections"] = []
                             else:
-                                request["connections"] = connections_for_runtime(self.store)
+                                request["connections"] = connections_for_runtime(self.store, project_id=run["project_id"], connection_ids=run["connection_ids"]) if run["connection_ids"] else []
+                        from .execution import Redactor
+                        redactor = Redactor(request["connections"])
                         process.stdin.write(json.dumps(request) + "\n")
                         process.stdin.flush()
                     finished = False
@@ -200,6 +251,7 @@ class LocalRuntime:
                             continue
                         if event.get("run_id") != run_id:
                             continue
+                        event = redactor.event(event)
                         if event.get("type") == "cell":
                             run["outputs"].append(event["output"])
                             with self.state_lock:
@@ -210,22 +262,39 @@ class LocalRuntime:
                             run.update(status=event["status"], error=event.get("error"))
                             finished = True
                             break
+                        else:
+                            from .execution import apply_event
+                            apply_event(self.store, run, event)
+                            self.store.put("runs", run)
                     if not finished:
                         if run_id in self.cancelled:
                             run.update(status="cancelled", error="Cancelled by user. The shared interpreter was reset.")
                         elif expired.is_set():
-                            run.update(status="failed", error=f"Run exceeded {self.timeout} seconds. The shared interpreter was reset.")
+                            run.update(status="failed", error=f"Run exceeded {run.get('timeout_seconds', self.timeout)} seconds. The shared interpreter was reset.")
                         else:
                             run.update(status="failed", error="Interpreter exited unexpectedly. See /data/logs/worker.log on the host.")
                 except Exception as exc:
-                    run.update(status="cancelled" if run_id in self.cancelled else "failed", error=str(exc))
+                    error = f"Run exceeded {run.get('timeout_seconds', self.timeout)} seconds. The shared interpreter was reset." if expired.is_set() else str(exc)
+                    run.update(status="cancelled" if run_id in self.cancelled else "failed", error=error)
                     self.reset()
                 finally:
                     timer.cancel()
+                    sample_stop.set()
+                    sampler.join(timeout=1)
                     if run_id in self.cancelled:
                         run.update(status="cancelled", error="Cancelled by user. The shared interpreter was reset.")
+                    elif expired.is_set():
+                        run.update(status="failed", error=f"Run exceeded {run.get('timeout_seconds', self.timeout)} seconds. The shared interpreter was reset.")
                     run.update(finished_at=now(), duration_ms=round((time.monotonic() - started) * 1000))
+                    from .execution import classify_error
+                    run["error_class"] = classify_error(run.get("error"), self.process.poll() if self.process else None)
                     self.store.put("runs", run)
+                    try:
+                        from .data_workspace import finalize_data_run
+                    except ImportError:
+                        pass
+                    else:
+                        finalize_data_run(self.store, run)
             finally:
                 with self.state_lock:
                     self._connection_snapshots.pop(run_id, None)

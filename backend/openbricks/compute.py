@@ -19,12 +19,13 @@ from pathlib import Path
 from uuid import uuid4
 
 import psutil
-from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 
 from .runtime import LocalRuntime, RuntimeBusy, now
+from . import __version__
 from .security import confined_path
 from .store import Store
 
@@ -44,6 +45,10 @@ class RunPayload(BaseModel):
     trigger: str = Field(default="manual", max_length=30)
     job_id: str | None = Field(default=None, max_length=80)
     connections: list[dict] = Field(default_factory=list, max_length=256)
+    parameters: dict = Field(default_factory=dict)
+    timeout_seconds: int | None = Field(default=None, ge=1, le=86400)
+    environment: dict | None = None
+    provenance: dict = Field(default_factory=dict)
 
 
 class ComputeStore(Store):
@@ -97,7 +102,7 @@ def compute_status(app):
         spark_version = importlib.metadata.version("pyspark")
     except importlib.metadata.PackageNotFoundError:
         spark_version = "not installed"
-    return {"service": "openbricks-compute", "version": "0.2.0", "status": "busy" if runtime.active_id else "idle",
+    return {"service": "openbricks-compute", "version": __version__, "status": "busy" if runtime.active_id else "idle",
             "hostname": platform.node(), "cpu_count": os.cpu_count() or 1, "memory_total": total, "memory_used": used,
             "disk_total": disk.total, "disk_used": disk.used, "spark_version": spark_version, "python_version": platform.python_version(),
             "active_runs": int(bool(runtime.active_id)), "queued_runs": runtime.queue.qsize(),
@@ -169,7 +174,7 @@ def create_compute_app(data_dir=None, token=None):
         finally:
             app.state.runtime.close()
 
-    app = FastAPI(title="OpenBricks compute", version="0.2.0", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
+    app = FastAPI(title="OpenBricks compute", version=__version__, lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
 
     def authenticated(request: Request):
         authorization = request.headers.get("authorization", "")
@@ -212,7 +217,8 @@ def create_compute_app(data_dir=None, token=None):
     def submit(body: RunPayload, request: Request):
         notebook = validate_notebook(body.notebook)
         return public(request.app.state.runtime.submit(notebook, body.cell_id, body.trigger, body.job_id,
-                                                      run_id=body.run_id, connections=body.connections))
+            run_id=body.run_id, connections=body.connections, parameters=body.parameters, timeout_seconds=body.timeout_seconds,
+            environment=body.environment, provenance=body.provenance))
 
     @app.get("/runs/{id}", dependencies=[Depends(authenticated)])
     def run(id: str, request: Request):
@@ -246,6 +252,17 @@ def create_compute_app(data_dir=None, token=None):
             if len(content) > limit:
                 raise HTTPException(413, "Wheel exceeds upload limit")
         return await run_in_threadpool(install_compute_wheel, request.app, file.filename or "", bytes(content))
+
+    @app.post("/artifacts/wheels", status_code=201, dependencies=[Depends(authenticated)])
+    async def artifact_wheel(request: Request, sha256: str = Form(...), file: UploadFile = File(...)):
+        from .environments import save_artifact
+        limit = int(os.getenv("OPENBRICKS_MAX_UPLOAD_MB", "100")) * 1024 * 1024
+        content = bytearray()
+        while chunk := await file.read(1024 * 1024):
+            content.extend(chunk)
+            if len(content) > limit:
+                raise HTTPException(413, "Wheel exceeds upload limit")
+        return await run_in_threadpool(save_artifact, request.app.state.store.directory, file.filename or "", bytes(content), sha256)
 
     return app
 
