@@ -24,7 +24,7 @@ jobs:
             image: openbricks-compute
     steps:
       - uses: actions/checkout@v6
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v4
       - name: Image identity
         id: identity
         env:
