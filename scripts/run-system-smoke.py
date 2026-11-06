@@ -1,7 +1,7 @@
 """Build and rigorously test a fresh, disposable OpenBricks installation.
 
 Requires Python 3.10+, httpx, PyYAML, and Docker Compose v2 on Linux containers.
-Only the reserved openbricks-smoke project and loopback ports 3001/3002/8025
+Only the reserved openbricks-smoke project and loopback ports 3001/3002/8025/8036
 are supported. Existing resources in that disposable project are removed first
 and all its containers/volumes are removed on exit. Production port 3000 and
 the normal OpenBricks Compose project are never used.

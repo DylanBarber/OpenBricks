@@ -378,7 +378,10 @@ def test_real_spark_status_store_reports_stages_shuffle_and_plans(
         profiler = SparkProfiler("run-profile", lambda: spark)
         profiler.cell("aggregate")
         frame = (
-            spark.range(1000)
+            # A single-partition range can satisfy the aggregate without an
+            # exchange, even with shuffle partitions configured. Force input
+            # partitions so the assertion below verifies real shuffle metrics.
+            spark.range(1000, numPartitions=2)
             .selectExpr("id % 5 AS grouping")
             .groupBy("grouping")
             .count()

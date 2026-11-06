@@ -222,7 +222,8 @@ class Proof:
         with self.policy("local"):
             target = self.notebook(
                 "Profile aggregate",
-                "display(spark.range(2000).selectExpr('id % 7 AS grouping').groupBy('grouping').count())",
+                # Force a real exchange even when the worker uses local[1].
+                "display(spark.range(2000, numPartitions=2).selectExpr('id % 7 AS grouping').groupBy('grouping').count())",
             )
             first = self.done(self.submit(target, memory=1536))
             assert first["status"] == "succeeded", first.get("error")
