@@ -31,6 +31,7 @@ services:
       - compute-data:/data
     restart: unless-stopped
     stop_grace_period: 30s
+    cpus: ${OPENBRICKS_COMPUTE_CPUS:-2}
     mem_limit: ${OPENBRICKS_MEMORY_LIMIT:-4g}
     memswap_limit: ${OPENBRICKS_MEMORY_LIMIT:-4g}
     shm_size: 1gb

@@ -8,6 +8,7 @@ feature tests and the disposable full-system smoke suite.
 | Capability | Contract |
 | --- | --- |
 | Run profiler | `GET /api/runs/{id}/profile?compare_run_id=...`; both runs must be readable and belong to the same notebook. Samples, Spark stages and plans are bounded and may explicitly be unavailable. |
+| Compute capacity | Authenticated compute `/status` adds optional `cpu_capacity`, the minimum known host, affinity and cgroup CPU capacity. Fractional quotas are supported. Existing `cpu_count` remains the host logical CPU count for compatibility. |
 | Dashboards | Project-scoped CRUD `/api/dashboards`; `POST /{id}/refresh` queues execution; `GET /{id}/snapshot?parameters=<JSON>` only reads a previously cached result. A failed refresh preserves the previous successful snapshot. |
 | Data assets | `GET /api/assets`, `GET /api/assets/graph` and `GET/PUT /api/assets/{id}`. Graph depth is at most two and node count at most 100. Health is recorded evidence, not a full live scan on each page view. |
 | Notebook secrets | `/api/secret-scopes` and `/api/secret-scopes/{id}/keys/{key}` manage metadata and write-only encrypted values. Notebook `/secret-refs` explicitly selects scope/key names. Runtime values are not part of saved source or manifests. |

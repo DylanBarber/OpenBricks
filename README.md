@@ -498,9 +498,11 @@ Remote catalog/S3 endpoints need independently reachable addresses too. See [DEP
 
 Management and compute default to **1 GB** and **4 GB** limits, with no extra swap. These are ceilings, not memory reserved at startup. Spark's heap is only part of compute memory: Python, native JVM memory, libraries, and the API share that allowance.
 
+Compute also defaults to a **two-CPU quota**. This bounds aggregate compute CPU use and lets the container-aware JVM size garbage-collection and supporting thread pools for the assigned CPUs, reducing avoidable native-thread overhead on larger hosts. `SPARK_MASTER=local[2]` sets Spark task threads; it does not impose a container CPU limit. Adjust `OPENBRICKS_COMPUTE_CPUS` deliberately with Spark threads, concurrency, and memory budgets when deploying a larger host. See [CPU and profiler details](docs/COMPUTE_PROFILING.md#cpu-quotas-and-jvm-sizing).
+
 Interactive workers retain their state until stopped, evicted for capacity, or idle for **15 minutes**. Job workers exit after their run. Notebook definitions, installed wheels, files, and persistent tables survive; Python variables and temporary views do not survive worker eviction.
 
-Under **Compute clusters â†’ Worker sessions**, inspect sessions and edit the compute policy. Defaults admit one active run, up to eight retained sessions, a 3,072 MB worker pool, and 2,048 MB per worker. Increase concurrency only when the host and workload fit. Per-project concurrency/memory budgets and priorities control admission; they do not reserve RAM. A process-tree memory monitor terminates an over-budget worker, and Docker enforces the aggregate 4 GB ceiling. Monitor sampling can briefly overshoot a worker budget. These trusted workers share the compute account and filesystem; they are separate processes, not separate security containers.
+Under **Compute clusters > Worker sessions**, inspect sessions and edit the compute policy. Defaults admit one active run, up to eight retained sessions, a 3,072 MB worker pool, and 2,048 MB per worker. Increase concurrency only when the host and workload fit. Per-project concurrency/memory budgets and priorities control admission; they do not reserve RAM. A process-tree memory monitor terminates an over-budget worker, and Docker enforces the aggregate 4 GB ceiling. Monitor sampling can briefly overshoot a worker budget. These trusted workers share the compute account and filesystem; they are separate processes, not separate security containers.
 
 The local Hive metastore permits one Spark owner at a time. Spark work waits for that lease, and an idle previous owner can be released. Python-only, DuckDB, and SQL Server workers can run concurrently when budgets permit.
 
@@ -508,6 +510,7 @@ The local Hive metastore permits one Spark owner at a time. Spark work waits for
 | --- | --- | --- |
 | `OPENBRICKS_CONTROL_MEMORY_LIMIT` | `1g` | Management ceiling |
 | `OPENBRICKS_MEMORY_LIMIT` | `4g` | Compute ceiling |
+| `OPENBRICKS_COMPUTE_CPUS` | `2` | Aggregate compute CPU quota |
 | `SPARK_DRIVER_MEMORY` | `1g` | Spark heap within compute's allowance |
 | `SPARK_MASTER` | `local[2]` | Local threads, or an existing Spark master |
 | `OPENBRICKS_IDLE_TIMEOUT_SECONDS` | `900` | Idle shutdown; `0` disables it |

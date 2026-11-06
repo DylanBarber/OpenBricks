@@ -11,6 +11,8 @@ OpenBricks separates the browser workspace from notebook execution. The default 
 
 These values are ceilings rather than memory reserved at startup. Each service's RAM-plus-swap limit matches its RAM ceiling, so no additional swap is available. Set `OPENBRICKS_CONTROL_MEMORY_LIMIT`, `OPENBRICKS_MEMORY_LIMIT`, and `SPARK_DRIVER_MEMORY` in `.env` to adjust the management, compute, and Spark limits deliberately. The Spark heap shares the compute container's limit with Python workers, native JVM memory, libraries, and the compute API.
 
+Local and standalone compute also receive a two-CPU quota by default through `OPENBRICKS_COMPUTE_CPUS=2`. The quota applies to the entire compute container, including concurrent workers. It informs container-aware JVM garbage-collection and supporting thread-pool sizing, limiting avoidable native-thread overhead on hosts with many cores. It does not reserve physical cores. `SPARK_MASTER=local[2]` independently controls Spark task threads. Increase the quota deliberately on a larger host alongside Spark threads, concurrency, and appropriate memory budgets; apply the change by recreating the compute service with its existing volume. See [CPU sizing and profiling](docs/COMPUTE_PROFILING.md#cpu-quotas-and-jvm-sizing).
+
 ## Start the local deployment
 
 From this directory, copy `.env.example` to `.env` if one does not exist. Preserve an existing `.env` and data volume when upgrading. Set a unique initial administrator password and a separate randomly generated compute token containing at least 32 characters.
@@ -82,6 +84,7 @@ Copy `compose.compute.yaml` to that host. Create a local `.env` beside it contai
 ```dotenv
 OPENBRICKS_COMPUTE_TOKEN=replace-with-your-unique-random-token
 OPENBRICKS_MEMORY_LIMIT=4g
+OPENBRICKS_COMPUTE_CPUS=2
 SPARK_DRIVER_MEMORY=1g
 SPARK_MASTER=local[2]
 OPENBRICKS_IDLE_TIMEOUT_SECONDS=900

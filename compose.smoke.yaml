@@ -43,6 +43,7 @@ services:
       OPENBRICKS_COMPUTE_TOKEN: ${OPENBRICKS_SMOKE_COMPUTE_TOKEN:?Set a disposable compute token}
       OPENBRICKS_SHARED_DATA: "true"
     volumes: ["data:/data"]
+    cpus: 2
     mem_limit: 3g
     memswap_limit: 3g
   remote:
@@ -55,6 +56,7 @@ services:
       OPENBRICKS_SPARK_CATALOG_MODE: unity
       OPENBRICKS_SPARK_DEFAULT_CATALOG: unity
     volumes: ["remote-data:/data"]
+    cpus: 2
     mem_limit: 3g
     memswap_limit: 3g
   sqlserver:
@@ -143,6 +145,7 @@ services:
       OPENBRICKS_COMPUTE_TOKEN: ${OPENBRICKS_SMOKE_RECOVERY_TOKEN:?Set a separate recovery compute token}
       OPENBRICKS_SHARED_DATA: "true"
     volumes: ["recovery-data:/data"]
+    cpus: 2
     mem_limit: 2g
     memswap_limit: 2g
   recovery-storage:

@@ -231,6 +231,7 @@ export type Compute = {
   status?: string;
   hostname?: string;
   cpu_count?: number;
+  cpu_capacity?: number;
   cpu_percent?: number;
   memory_total?: number;
   memory_used?: number;

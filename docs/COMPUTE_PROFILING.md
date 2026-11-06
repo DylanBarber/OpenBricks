@@ -93,6 +93,33 @@ GET /api/runs/{run_id}/profile?compare_run_id={other_run_id}
 The response includes the current profile and optional duration, peak-memory,
 queue-wait, and catalog-wait comparison. It does not rerun either notebook.
 
+## CPU quotas and JVM sizing
+
+The local and standalone Compose compute services default to:
+
+```dotenv
+OPENBRICKS_COMPUTE_CPUS=2
+```
+
+This is the entire compute container's CPU quota, shared by its API and workers;
+it is not a per-notebook reservation. Container-aware JVMs use assigned CPU
+capacity when sizing garbage-collection and supporting thread pools. Bounding
+that capacity reduces avoidable native-thread overhead on many-core hosts.
+Spark's `local[n]` master controls task threads separately and does not limit
+the CPU available to those JVM pools.
+
+For a larger host, adjust the quota deliberately with Spark task threads,
+concurrency, and worker/container memory budgets, then recreate the compute
+service with its existing data volume. The CPU timeline continues to report
+process CPU time: 100% means one used core, not 100% of the configured quota.
+The disposable smoke and SQL-test compute containers use a fixed two-CPU quota
+so resource checks are reproducible across developer hosts and CI.
+
+See the [Docker Compose CPU limit](https://docs.docker.com/reference/compose-file/services/#cpus)
+and [Java 17 container/processor sizing](https://docs.oracle.com/en/java/javase/17/docs/specs/man/java.html)
+references. CPU quotas complement the existing RSS guard and memory ceilings;
+they do not increase a worker's allowed memory.
+
 ## Concurrent Spark workers with Unity Catalog
 
 The default **hive** mode preserves existing local Hive tables and uses one

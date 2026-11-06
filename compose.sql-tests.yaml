@@ -38,5 +38,6 @@ services:
     depends_on:
       sqlserver:
         condition: service_healthy
+    cpus: 2
     mem_limit: 3g
     memswap_limit: 3g

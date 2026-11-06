@@ -32,6 +32,7 @@ from .security import confined_path
 from .store import Store
 from .resources import ResourcePolicy
 from .compute_retention import ComputeRetention
+from .cpu_capacity import cpu_capacity
 
 
 def public(value):
@@ -120,7 +121,7 @@ def compute_status(app):
         spark_version = importlib.metadata.version("pyspark")
     except importlib.metadata.PackageNotFoundError:
         spark_version = "not installed"
-    return {
+    status = {
         "service": "openbricks-compute",
         "version": __version__,
         "status": "busy" if runtime.active_count else "idle",
@@ -163,6 +164,10 @@ def compute_status(app):
             else "compute-local"
         ),
     }
+    capacity = cpu_capacity()
+    if capacity is not None:
+        status["cpu_capacity"] = capacity
+    return status
 
 
 def install_compute_wheel(app, filename, content):
