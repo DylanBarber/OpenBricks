@@ -26,7 +26,7 @@ services:
       target: compute
       args:
         OPENBRICKS_BUILD_ID: ${OPENBRICKS_BUILD_ID:-development}
-        OPENBRICKS_VERSION: 0.4.0
+        OPENBRICKS_VERSION: 0.5.0
     environment:
       OPENBRICKS_TEST_SQLSERVER: "1"
       OPENBRICKS_SQLSERVER_HOST: sqlserver
