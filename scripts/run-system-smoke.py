@@ -21,6 +21,7 @@ from pathlib import Path
 import re
 import secrets
 import signal
+import shutil
 import socket
 import subprocess
 import sys
@@ -61,6 +62,8 @@ PHASES = (
     "real SMTP and webhook retry across management restart",
     "Basic/Advanced schedules and actual cron after management restart",
     "compute restart with one committed side effect and no duplicate attempt",
+    "v5 real Spark profiling, shared-catalog concurrency and cancellation isolation",
+    "v5 secrets, dashboards, assets, reviews, live coediting and real OIDC browser E2E",
     "encrypted backup into a fresh host, external recovery and idempotent replay",
 )
 
@@ -93,6 +96,7 @@ def validate_config(config):
                 )
     allowed_binds = {
         (ROOT / "scripts/stable-notification-receiver.py").resolve(),
+        (ROOT / "scripts/v5-oidc-provider.py").resolve(),
         *(
             path.resolve()
             for path in (ROOT / "docker/catalog").iterdir()
@@ -102,7 +106,7 @@ def validate_config(config):
     allowed_ports = {
         "control": {("127.0.0.1", "3001", 3000)},
         "recovery-control": {("127.0.0.1", "3002", 3000)},
-        "receiver": {("127.0.0.1", "8025", 8025)},
+        "receiver": {("127.0.0.1", "8025", 8025), ("127.0.0.1", "8036", 8036)},
     }
     for name, service in config["services"].items():
         if (
@@ -218,6 +222,13 @@ class Runner:
                 raise SmokeError(
                     "Install the host test dependencies: python -m pip install ./cli"
                 )
+        if (
+            not shutil.which("node")
+            or not (ROOT / "web/node_modules/@playwright/test/cli.js").is_file()
+        ):
+            raise SmokeError(
+                "Install web test dependencies with npm --prefix web ci and the Playwright Chromium browser before running the full smoke suite"
+            )
         if os.name != "nt":
             os.umask(0o077)
         self.output.mkdir(parents=True, mode=0o700)
@@ -298,7 +309,7 @@ class Runner:
             "remove stale disposable smoke resources",
             timeout=180,
         )
-        for port in (3001, 3002, 8025):
+        for port in (3001, 3002, 8025, 8036):
             with socket.socket() as probe:
                 try:
                     probe.bind(("127.0.0.1", port))
@@ -760,6 +771,51 @@ class Runner:
         self.wait_compute()
         self.wait_http()
         self.platform("compute-restart-verify")
+        self.proof(
+            "v5-compute-smoke.py",
+            "--section",
+            "profile",
+            "--receipt",
+            self.output / "v5-compute.json",
+            timeout=1800,
+        )
+        self.proof(
+            "v5-compute-smoke.py",
+            "--section",
+            "hive",
+            "--receipt",
+            self.output / "v5-compute.json",
+            timeout=1800,
+        )
+        self.up("remote")
+        self.proof(
+            "v5-compute-smoke.py",
+            "--section",
+            "unity",
+            "--receipt",
+            self.output / "v5-compute.json",
+            timeout=1800,
+        )
+        self.stop("remote")
+        self.proof(
+            "v5-features-smoke.py",
+            "--phase",
+            "prepare",
+            "--receipt",
+            self.output / "v5-features.json",
+            timeout=1200,
+        )
+        self.command(
+            [
+                shutil.which("node"),
+                str(ROOT / "web/node_modules/@playwright/test/cli.js"),
+                "test",
+                "--config",
+                str(ROOT / "web/playwright.config.ts"),
+            ],
+            "v5 Chromium end-to-end UI and OIDC proof",
+            timeout=1800,
+        )
         # Prepare the source archive before bringing up a second management
         # host. SQL and the remote worker are already stopped to cap peak RAM.
         self.proof(
@@ -801,6 +857,14 @@ class Runner:
         proof = json.loads(runtime_receipt.read_text(encoding="utf-8"))
         if not proof.get("recovery_proof", {}).get("passed"):
             raise SmokeError("Fresh-host recovery did not produce a passing receipt")
+        self.proof(
+            "v5-features-smoke.py",
+            "--phase",
+            "recover",
+            "--receipt",
+            self.output / "v5-features.json",
+            timeout=1200,
+        )
         self.summary["proofs_passed"] = True
 
     def cleanup(self):

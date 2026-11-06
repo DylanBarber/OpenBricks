@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "openbricks-cli"
-version = "0.4.0"
+version = "0.5.0"
 description = "Deploy and run OpenBricks data projects from Git and CI"
 readme = "README.md"
 requires-python = ">=3.10"

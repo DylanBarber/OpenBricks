@@ -6,7 +6,7 @@ import json
 import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
-from threading import RLock
+from threading import RLock, local
 from typing import Any
 
 
@@ -27,6 +27,7 @@ class Store:
         self.directory.mkdir(parents=True, exist_ok=True)
         self.path = self.directory / "openbricks.sqlite3"
         self.lock = RLock()
+        self._live_edit = local()
         with self.connect() as db:
             db.execute("PRAGMA journal_mode=WAL")
             db.execute(
@@ -95,6 +96,37 @@ class Store:
                 db.close()
 
     def put(self, kind: str, value: dict[str, Any]):
+        with self.lock:
+            return self._put(kind, value)
+
+    def _put(self, kind: str, value: dict[str, Any]):
+        if kind == "notebooks":
+            with self.lock:
+                existing = self.get(kind, value["id"])
+                if existing is None or existing.get("cells") != value.get("cells"):
+                    from .notebooks import validate_source_size
+
+                    validate_source_size(value.get("cells", []))
+                if (
+                    existing
+                    and existing.get("collaboration_enabled")
+                    and getattr(self._live_edit, "notebook_id", None) != value["id"]
+                ):
+                    if "collaboration_enabled" not in value:
+                        value = {**value, "collaboration_enabled": True}
+                    elif not value["collaboration_enabled"]:
+                        raise ValueError(
+                            "Disable live collaboration through its mode endpoint before replacing notebook metadata"
+                        )
+                if (
+                    existing
+                    and existing.get("collaboration_enabled")
+                    and existing.get("cells") != value.get("cells")
+                    and getattr(self._live_edit, "notebook_id", None) != value["id"]
+                ):
+                    raise ValueError(
+                        "Live collaboration is enabled. Finish cell edits and disable it before importing or replacing notebook source"
+                    )
         metadata = (
             "name",
             "parent_id",
@@ -122,6 +154,15 @@ class Store:
                 ),
             )
         return value
+
+    @contextmanager
+    def live_notebook_edit(self, notebook_id):
+        previous = getattr(self._live_edit, "notebook_id", None)
+        self._live_edit.notebook_id = notebook_id
+        try:
+            yield
+        finally:
+            self._live_edit.notebook_id = previous
 
     def get(self, kind: str, id: str):
         with self.connect() as db:
@@ -254,7 +295,7 @@ class Store:
                 "SELECT COUNT(*) FROM documents WHERE " + where, params
             ).fetchone()[0]
             rows = db.execute(
-                "SELECT json_remove(body,'$.outputs','$.logs','$.data_events','$.data_result','$.quality_reports','$.lineage','$._cells','$._reset_scope','$._notebook','$._cell_id','$._remote_submitted','$._execution_spec') FROM documents WHERE "
+                "SELECT json_remove(body,'$.outputs','$.logs','$.data_events','$.data_result','$.quality_reports','$.lineage','$.profile','$._cells','$._reset_scope','$._notebook','$._cell_id','$._remote_submitted','$._execution_spec') FROM documents WHERE "
                 + where
                 + " ORDER BY created_at DESC,id DESC LIMIT ? OFFSET ?",
                 (*params, limit, offset),

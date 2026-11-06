@@ -21,6 +21,7 @@ import {
   Settings2,
   History,
   Wand2,
+  Users,
 } from "lucide-react";
 
 import {
@@ -53,6 +54,14 @@ import {
 } from "./resource-controls";
 
 const CodeEditor = dynamic(() => import("./code-editor"), { ssr: false });
+const CollaborationPanel = dynamic(() => import("./collaboration-panel"), {
+  ssr: false,
+});
+const NotebookSecretsPicker = dynamic(() =>
+  import("./notebook-secrets-picker").then(
+    (module) => module.NotebookSecretsPicker,
+  ),
+);
 
 function Output({ output }: { output?: CellOutput }) {
   if (!output) return null;
@@ -119,7 +128,7 @@ export function NotebookEditor({
   clusters,
   projects,
   connections,
-  canEdit = true,
+  canEdit: permissionToEdit = true,
   canRun = true,
 }: {
   notebook: Notebook;
@@ -134,6 +143,9 @@ export function NotebookEditor({
   canRun?: boolean;
 }) {
   const [notebook, setNotebook] = useState(initial);
+  const canEdit = permissionToEdit && !notebook.collaboration_enabled;
+  const [collaborating, setCollaborating] = useState(false);
+  const [secretSelection, setSecretSelection] = useState(false);
 
   const [dirty, setDirty] = useState(false);
 
@@ -538,6 +550,31 @@ export function NotebookEditor({
         </div>
         <div>
           {run ? <Status status={run.status} /> : null}
+          <button
+            className="text-button"
+            disabled={busy}
+            onClick={() =>
+              void perform(async () => {
+                if (dirty) await save();
+                setCollaborating(true);
+              })
+            }
+          >
+            <Users size={13} />
+            Collaborate
+          </button>
+          <button
+            className="text-button"
+            disabled={busy}
+            onClick={() =>
+              void perform(async () => {
+                if (dirty) await save();
+                setSecretSelection(true);
+              })
+            }
+          >
+            Notebook secrets
+          </button>
           {active ? (
             <button
               className="text-button"
@@ -994,6 +1031,51 @@ export function NotebookEditor({
         </Modal>
       ) : null}
 
+      {collaborating ? (
+        <CollaborationPanel
+          notebookId={notebook.id}
+          canEdit={permissionToEdit}
+          onChanged={onChanged}
+          onClose={() => {
+            setCollaborating(false);
+            void api<Notebook>(`/notebooks/${notebook.id}`)
+              .then((value) => {
+                if (alive.current) {
+                  setNotebook(value);
+                  setDirty(false);
+                }
+              })
+              .catch((error) => onError(error.message));
+            onChanged();
+          }}
+        />
+      ) : null}
+      {secretSelection ? (
+        <Modal
+          title="Notebook secrets"
+          onClose={() => setSecretSelection(false)}
+          wide
+        >
+          <div className="modal-form">
+            <NotebookSecretsPicker
+              notebookId={notebook.id}
+              projectId={notebook.project_id || "default"}
+              canEdit={permissionToEdit}
+              onChanged={() => {
+                void api<Notebook>(`/notebooks/${notebook.id}`)
+                  .then((value) => {
+                    if (alive.current) {
+                      setNotebook(value);
+                      setDirty(false);
+                    }
+                  })
+                  .catch((error) => onError(error.message));
+                onChanged();
+              }}
+            />
+          </div>
+        </Modal>
+      ) : null}
       {showRevisions ? (
         <Modal
           title="Notebook revision history"

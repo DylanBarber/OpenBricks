@@ -96,6 +96,15 @@ const DeploymentsPanel = dynamic(() => import("./deployments-panel"));
 const ServiceAccountsPanel = dynamic(() => import("./service-accounts-panel"));
 const ResourceControls = dynamic(() => import("./resource-controls"));
 const BackupPoliciesPanel = dynamic(() => import("./backup-policies-panel"));
+const DashboardsPanel = dynamic(() => import("./dashboards-panel"));
+const AssetsPanel = dynamic(() => import("./assets-panel"));
+const AuditPanel = dynamic(() => import("./audit-panel"));
+const SecretsPanel = dynamic(() =>
+  import("./secrets-panel").then((module) => module.SecretsPanel),
+);
+const OidcLogin = dynamic(() =>
+  import("./oidc-login").then((module) => module.OidcLogin),
+);
 import { ThemeToggle } from "./theme-toggle";
 import { WorkspaceBrowser } from "./workspace-browser";
 import { RunBrowser } from "./run-browser";
@@ -124,8 +133,16 @@ type View =
   | "deployments"
   | "serviceaccounts"
   | "backups"
+  | "dashboards"
+  | "assets"
+  | "secrets"
+  | "audit"
   | "releases";
 const viewNames: Record<View, string> = {
+  dashboards: "Dashboards",
+  assets: "Data assets & lineage",
+  secrets: "Notebook secrets",
+  audit: "Audit history",
   workflows: "Workflows",
   data: "Data workspace",
   projects: "Projects & access",
@@ -163,6 +180,8 @@ const navigation = [
     group: "DEVELOP",
     items: [
       { id: "data", label: "Data workspace", icon: Database },
+      { id: "dashboards", label: "Dashboards", icon: Activity },
+      { id: "assets", label: "Data assets & lineage", icon: GitBranch },
       { id: "repositories", label: "Git repositories", icon: FolderGit2 },
       { id: "releases", label: "Releases", icon: GitBranch },
       { id: "deployments", label: "Deployments", icon: Upload },
@@ -175,6 +194,8 @@ const navigation = [
     group: "INFRASTRUCTURE",
     items: [
       { id: "projects", label: "Projects & access", icon: Users },
+      { id: "secrets", label: "Notebook secrets", icon: LockKeyhole },
+      { id: "audit", label: "Audit history", icon: ShieldCheck },
       { id: "operations", label: "Operations", icon: Settings2 },
       { id: "backups", label: "Backup & recovery", icon: ShieldCheck },
       { id: "serviceaccounts", label: "Service accounts", icon: LockKeyhole },
@@ -300,6 +321,7 @@ function Login({ onLogin }: { onLogin: (user: User) => void }) {
               <ArrowRight size={16} />
             </button>
           </form>
+          <OidcLogin />
           <div className="login-note">
             <ShieldCheck size={17} />
             <span>
@@ -907,8 +929,11 @@ export function OpenBricks() {
               {group.items
                 .filter(
                   (item) =>
-                    !["serviceaccounts", "backups"].includes(item.id) ||
-                    user.role === "admin",
+                    (!["serviceaccounts", "backups"].includes(item.id) ||
+                      user.role === "admin") &&
+                    (item.id !== "audit" ||
+                      user.role === "admin" ||
+                      projects.some((project) => project.role === "owner")),
                 )
                 .map((item) => (
                   <button
@@ -1108,6 +1133,38 @@ export function OpenBricks() {
           />
         ) : (
           <main className="page-content">
+            {view === "dashboards" ? (
+              <DashboardsPanel
+                key={projectId}
+                projects={projects.filter(
+                  (project) => project.id === projectId,
+                )}
+                onError={notifyError}
+                onRun={openRun}
+              />
+            ) : null}
+            {view === "assets" ? (
+              <AssetsPanel
+                key={projectId}
+                projects={projects.filter(
+                  (project) => project.id === projectId,
+                )}
+                onError={notifyError}
+                onRun={openRun}
+              />
+            ) : null}
+            {view === "secrets" ? (
+              <SecretsPanel
+                key={projectId}
+                projects={projects.filter(
+                  (project) => project.id === projectId,
+                )}
+                onError={notifyError}
+              />
+            ) : null}
+            {view === "audit" ? (
+              <AuditPanel projects={projects} onError={notifyError} />
+            ) : null}
             {view === "automation" ? (
               <AutomationPanel
                 key={projectId}

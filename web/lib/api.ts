@@ -43,6 +43,9 @@ export type Notebook = {
   project_id?: string;
   connection_ids?: string[];
   parameter_definitions?: ParameterDefinition[];
+  version?: number;
+  collaboration_enabled?: boolean;
+  secret_refs?: { scope: string; key: string }[];
 };
 export type NotebookSummary = Omit<Notebook, "cells"> & { cells?: Cell[] };
 export type Folder = {

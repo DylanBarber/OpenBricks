@@ -23,6 +23,14 @@ services:
       OPENBRICKS_COMPUTE_TOKEN: ${OPENBRICKS_SMOKE_COMPUTE_TOKEN:?Set a disposable compute token}
       OPENBRICKS_COMPUTE_SHARED_DATA: "true"
       OPENBRICKS_CATALOG_URL: http://catalog:8080
+      OPENBRICKS_OIDC_ISSUER: http://receiver:8036
+      OPENBRICKS_OIDC_CLIENT_ID: openbricks-smoke
+      OPENBRICKS_OIDC_REDIRECT_URI: http://127.0.0.1:3001/api/auth/oidc/callback
+      OPENBRICKS_OIDC_ALLOW_HTTP: "true"
+      OPENBRICKS_OIDC_DEV_HTTP_HOSTS: receiver,127.0.0.1
+      OPENBRICKS_OIDC_ALLOWED_ENDPOINT_ORIGINS: '["http://127.0.0.1:8036"]'
+      OPENBRICKS_OIDC_GROUP_ROLE_MAP: '{"openbricks-smoke-users":{"default":"editor"}}'
+      OPENBRICKS_OIDC_DISPLAY_NAME: Smoke identity provider
     volumes: ["data:/data"]
     mem_limit: 1g
     memswap_limit: 1g
@@ -44,9 +52,11 @@ services:
       <<: *compute-environment
       OPENBRICKS_COMPUTE_TOKEN: ${OPENBRICKS_SMOKE_REMOTE_TOKEN:?Set a separate remote token}
       OPENBRICKS_SHARED_DATA: "false"
+      OPENBRICKS_SPARK_CATALOG_MODE: unity
+      OPENBRICKS_SPARK_DEFAULT_CATALOG: unity
     volumes: ["remote-data:/data"]
-    mem_limit: 2g
-    memswap_limit: 2g
+    mem_limit: 3g
+    memswap_limit: 3g
   sqlserver:
     image: mcr.microsoft.com/mssql/server:2025-latest@sha256:245f6b1c8903edae52cb20fa31419cefcde1a49938bb8c3447099011fc871ca3
     profiles: [sql]
@@ -94,11 +104,13 @@ services:
     memswap_limit: 512m
   receiver:
     image: ${OPENBRICKS_SMOKE_COMPUTE_IMAGE:-openbricks-compute:local}
-    command: [python, /smoke/receivers.py]
-    ports: ["127.0.0.1:8025:8025"]
-    volumes: ["./scripts/stable-notification-receiver.py:/smoke/receivers.py:ro"]
-    mem_limit: 64m
-    memswap_limit: 64m
+    command: [python, /smoke/receivers.py, --oidc-fixture, /smoke/oidc.py]
+    ports: ["127.0.0.1:8025:8025", "127.0.0.1:8036:8036"]
+    volumes:
+      - ./scripts/stable-notification-receiver.py:/smoke/receivers.py:ro
+      - ./scripts/v5-oidc-provider.py:/smoke/oidc.py:ro
+    mem_limit: 128m
+    memswap_limit: 128m
     healthcheck:
       test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8025/health', timeout=3)"]
       interval: 5s

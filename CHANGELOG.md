@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.5.0 — 2026-11-06
+
+- Added bounded run profiling, Spark stage/query diagnostics and captured-run comparisons.
+- Added shared cached SQL dashboards, typed filters, layouts and scheduled refreshes.
+- Added asset ownership, recorded quality history, freshness thresholds and lineage graphs.
+- Added notebook presence, threaded comments, source-pinned reviews and leased per-cell coediting.
+- Added encrypted, project-scoped notebook secrets with explicit bindings, rotation and captured-output redaction.
+- Added optional OIDC/PKCE sign-in, group-role mapping and an audit search/export console.
+- Added explicit Unity Catalog Spark concurrency while retaining the default single-owner Hive mode.
+- Extended the mandatory release gate with Chromium E2E, real OIDC, concurrent Spark and fresh-host feature recovery.
+
+See [release notes](docs/releases/0.5.0.md).
+
 ## 0.4.0 — 2026-11-05
 
 First stable release of the 0.4 feature set, validated against a disposable SQL Server and the complete containerized application.

@@ -920,3 +920,7 @@ def register_data_routes(app, authenticated, access):
                 payload=spec,
             )
             return submit(body, request, user, id)
+
+    # Internal coordinators reuse exactly the same authorization, connector
+    # selection and bounded compute submission path as the public SQL API.
+    return {"submit": submit, "execute": execute}

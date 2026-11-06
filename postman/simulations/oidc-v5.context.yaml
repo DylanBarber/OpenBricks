@@ -1,0 +1,90 @@
+# Simulation context — OpenBricks OIDC verification
+#
+# Generated 2026-11-06.
+#
+# What is believed to be true about the services this simulation stands in for,
+# and what each belief rests on. A `null` is something nobody has established
+# yet.
+#
+# Written from a fixed template and never recreated. How to read it, and how to
+# write a run back into it, is in the api-simulation skill
+# (skills/api-simulation/reference/context_file.md).
+
+simulation: "OpenBricks OIDC verification"
+generated: "2026-11-06"
+
+# What this simulation stands in for and what work it unblocks. Both need
+# hindsight, so they are the last thing to write. The members it serves, their
+# route keys and the hosts they answer for are in the .sim.yaml beside this file.
+purpose:
+  stands_in_for: A synthetic OpenID Connect authorization-code provider with PKCE S256 and RS256 signing.
+  unblocks: Reproducible local validation of the actual OpenBricks OIDC HTTP client without real identity-provider credentials.
+
+# What the code relies on about a dependency's behaviour — one claim per entry,
+# each { id, status, claim, reason, verification, source, updated_at }.
+#
+#   status        supported     evidence supports it, within a stated scope
+#                 contradicted  evidence gives a counterexample
+#                 unknown       available evidence cannot establish or reject it
+#                 conflicting   applicable sources disagree
+#
+#   reason        why the evidence adds up to that status
+#   verification  what was checked and what it showed — a contract read, a
+#                 request made and its response, a handler inspected. Name what
+#                 is still planned or blocked, and what has gone stale and why.
+#   source        where to go to re-check it: a file and line range, a run, a
+#                 published contract. A claim with nothing to point at is
+#                 `unknown`.
+#   updated_at    the day this entry was last written, YYYY-MM-DD. Set it when
+#                 you add a claim and again whenever you change one, so a claim
+#                 nobody has touched in months is visible as such.
+#
+# A claim is about the dependency, not about the simulation — what the caller
+# is taken to be, which plan or permission is assumed, the order calls go in,
+# what gets retried, the shape of the data.
+#
+#   - id: charges-idempotent-for-24h
+#     status: supported
+#     claim: Payments treats a repeated Idempotency-Key as the same charge for
+#       24 hours. Beyond that it is a new charge.
+#     reason: The contract guarantees it for that window, and a run inside the
+#       window agreed. The 24-hour boundary itself is untested.
+#     verification: Read the provider's API reference for POST /charges, then
+#       sent the same key twice 10 minutes apart and got the first charge id
+#       back both times.
+#     source: the provider's API reference for POST /charges; runs/idempotency-001
+#     updated_at: "2026-11-06"
+assumptions:
+  - id: oidc-core-code-flow
+    status: supported
+    claim: An authorization code is bound to the client, exact callback URI, browser challenge and PKCE verifier; the ID token carries the requested nonce.
+    reason: The local stateful mock validates the actual form request and issues signed tokens only for its saved one-use authorization code.
+    verification: scripts/v5-oidc-simulation-check.py passed two real HTTP logins and rejected bad nonce, signature, audience, expiry, removed groups and a provider 500; its request counters and simulation request log showed discovery, authorization, token and JWKS traffic.
+    source: https://openid.net/specs/openid-connect-core-1_0.html; postman/contracts/oidc-provider.openapi.yaml; scripts/v5-oidc-simulation-check.py
+    updated_at: '2026-11-06'
+  - id: signing-key-rotation
+    status: supported
+    claim: A new signing key ID causes one bounded JWKS refresh and a valid new login succeeds.
+    reason: The stateful mock rotated its ephemeral in-memory RSA key after the client's first successful login.
+    verification: The checker passed the final login; GET /jwks was observed twice across eight token exchanges.
+    source: backend/openbricks/oidc.py; scripts/v5-oidc-simulation-check.py
+    updated_at: '2026-11-06'
+  - id: vendor-deployment-compatibility
+    status: unknown
+    claim: A particular live Entra, Keycloak or other provider deployment has the same configured claims, endpoints and client authentication policy.
+    reason: No external provider credentials or selected live tenant were supplied. This simulation models the protocol, not a vendor tenant.
+    verification: Owner-workspace mock search was skipped because the Postman CLI was signed out. No Postman cloud resources were published. Live tenant configuration still requires its own sign-in test.
+    source: docs/IDENTITY_AND_SECRETS.md
+    updated_at: '2026-11-06'
+
+# What the claims above were written against: { id, date, commit, cli }, from
+# `git rev-parse HEAD` and `postman --version`. Append an entry when either
+# differs, and say so when the tree is dirty — a sha alone reads as a clean
+# checkout. A claim carried over from an older fingerprint is one nothing has
+# re-checked since.
+fingerprints:
+  - id: v5-local-security-implementation
+    date: '2026-11-06'
+    commit: 1bce25fae56dd7ee1dae36985af919f351886fd5
+    cli: 1.86.0
+    tree: Dirty working tree containing the new 0.5 security implementation and simulation.

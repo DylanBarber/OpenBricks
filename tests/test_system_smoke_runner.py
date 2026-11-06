@@ -58,10 +58,11 @@ def config(runner):
         ("control", 3001, 3000),
         ("recovery-control", 3002, 3000),
         ("receiver", 8025, 8025),
+        ("receiver", 8036, 8036),
     ):
-        value["services"][name]["ports"] = [
+        value["services"][name].setdefault("ports", []).append(
             {"host_ip": "127.0.0.1", "published": str(port), "target": target}
-        ]
+        )
     return value
 
 

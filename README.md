@@ -1,10 +1,10 @@
-![OpenBricks — an open home for your data work](docs/assets/openbricks-banner.svg)
+![OpenBricks â€” an open home for your data work](docs/assets/openbricks-banner.svg)
 
 # OpenBricks
 
 **An open home for your data work.**
 
-**Stable: 0.4.0.** Build from source with the quickstart below, or use the pinned Docker images and deployment bundle from a [published release](https://github.com/DylanBarber/OpenBricks/releases). See [container installation and releases](docs/RELEASING.md).
+**Version: 0.5.0.** Build from source with the quickstart below, or use the pinned Docker images and deployment bundle from a [published release](https://github.com/DylanBarber/OpenBricks/releases). See [container installation and releases](docs/RELEASING.md).
 
 Prebuilt images are available on Docker Hub for [management](https://hub.docker.com/r/darbs5342/openbricks) and [compute](https://hub.docker.com/r/darbs5342/openbricks-compute). Follow the [versioned image installation guide](DEPLOYMENT.md#versioned-images-and-upgrades) to use them with `compose.release.yaml`. GHCR images remain supported.
 
@@ -14,7 +14,7 @@ A self-hosted notebook workspace for Python, Spark SQL, and scheduled data pipel
 
 Start with two Docker containers on one computer. Add trusted remote compute hosts when you need more room. Keep your files on your own infrastructure, with no cloud account required.
 
-[Quick start](#quick-start) · [Git walkthrough](#from-git-to-a-scheduled-pipeline) · [Examples](#example-projects) · [Deployment](DEPLOYMENT.md) · [Contributing](CONTRIBUTING.md)
+[Quick start](#quick-start) Â· [Git walkthrough](#from-git-to-a-scheduled-pipeline) Â· [Examples](#example-projects) Â· [Deployment](DEPLOYMENT.md) Â· [Contributing](CONTRIBUTING.md)
 
 <details>
 <summary>Explore the guide</summary>
@@ -75,7 +75,19 @@ The screenshot shows a real Spark SQL result and chart from a disposable workspa
 | Projects and appearance | Assign viewer/operator/editor/owner roles and selected notebook connections; use System, Light, or Dark themes |
 | Operations | Inspect worker budgets, manage retention, encrypted local/off-host backups, restore drills, recovery plans, and alert destinations |
 
-### New in 0.4
+### New in 0.5
+
+- **Run profiler:** separate Python/JVM/container memory, CPU timelines, Spark stages, query plans, shuffle/spill statistics, and previous-run comparisons.
+- **Shared dashboards:** saved-query tiles, typed filters, persistent layouts, scheduled refreshes, and bounded cached results for project viewers.
+- **Data asset health:** recorded quality history, ownership, freshness thresholds, and an interactive upstream/downstream lineage graph.
+- **Team collaboration:** editing presence, threaded comments, source-pinned review requests, and simultaneous edits to separate cells with short-lived ownership leases.
+- **Notebook secrets:** project-scoped encrypted keys, explicit notebook selection, `dbutils.secrets.get`, rotation, and output redaction.
+- **Optional SSO:** OIDC authorization-code/PKCE login and group-to-project role mappings; local administrator login remains available.
+- **Concurrent Spark:** explicit Unity Catalog mode runs independent Spark workers under existing memory budgets; the default local Hive mode preserves its single-owner lease.
+
+See [profiling and concurrency](docs/COMPUTE_PROFILING.md), [dashboards and assets](docs/DASHBOARDS_AND_ASSETS.md), [identity and secrets](docs/IDENTITY_AND_SECRETS.md), and the [new API contracts](docs/API_V5.md).
+
+### Included from 0.4
 
 - **Independent workers:** notebook/user sessions, fresh job workers, queue priorities, project budgets, and visible memory usage under the existing Docker limits.
 - **Git authoring:** edit repository files, review diffs, create branches, export notebooks, commit/push, and open GitHub pull requests. Imports stop for review when workspace cell sources have changed.
@@ -191,7 +203,7 @@ In **Notebook settings**, define typed parameters (`string`, `integer`, `number`
 
 ## Workflows, releases, and reruns
 
-Open **Workflows → New workflow**, add notebook steps, and connect them through **Runs after** dependencies. Each step can select a workspace notebook or immutable release/path, compute, parameter overrides, timeout, and retry policy. Steps wait for successful dependencies; independent work can run on different compute targets. Use persisted datasets to exchange results between steps.
+Open **Workflows â†’ New workflow**, add notebook steps, and connect them through **Runs after** dependencies. Each step can select a workspace notebook or immutable release/path, compute, parameter overrides, timeout, and retry policy. Steps wait for successful dependencies; independent work can run on different compute targets. Use persisted datasets to exchange results between steps.
 
 Retries are disabled unless you explicitly mark a step's writes safe to retry. Unknown execution outcomes are excluded from automatic retries. Workflow history shows step attempts and notebook logs; **Restart failed steps** creates a new run from the original captured sources/environments and preserves unaffected successful steps. Reconcile external effects before manually replacing uncertain work.
 
@@ -205,22 +217,22 @@ The [starter repository](examples/notebook-repo/) demonstrates the complete work
 
 ~~~text
 examples/notebook-repo/
-├── pyproject.toml
-├── src/openbricks_demo/
-│   ├── pipeline.py
-│   └── fixtures/orders.csv
-└── notebooks/
-    ├── 00_run_pipeline.py
-    ├── bronze/10_ingest_orders.py
-    ├── silver/20_clean_orders.py
-    └── gold/
-        ├── 30_publish_revenue.py
-        └── 40_query_revenue.sql
+â”œâ”€â”€ pyproject.toml
+â”œâ”€â”€ src/openbricks_demo/
+â”‚   â”œâ”€â”€ pipeline.py
+â”‚   â””â”€â”€ fixtures/orders.csv
+â””â”€â”€ notebooks/
+    â”œâ”€â”€ 00_run_pipeline.py
+    â”œâ”€â”€ bronze/10_ingest_orders.py
+    â”œâ”€â”€ silver/20_clean_orders.py
+    â””â”€â”€ gold/
+        â”œâ”€â”€ 30_publish_revenue.py
+        â””â”€â”€ 40_query_revenue.sql
 ~~~
 
 ### 1. Clone a repository in the UI
 
-Open **Git repositories → Clone repository**.
+Open **Git repositories â†’ Clone repository**.
 
 | Field | For the bundled example |
 | --- | --- |
@@ -244,7 +256,7 @@ Discovery includes `.ipynb`, `.sql`, and Databricks source `.py` files whose ope
 
 The starter notebooks use `openbricks_demo`, so install its wheel before their first run.
 
-Open **Packages → Build wheel**, select the cloned repository, and set **Project directory**:
+Open **Packages â†’ Build wheel**, select the cloned repository, and set **Project directory**:
 
 | What you cloned | Project directory |
 | --- | --- |
@@ -263,7 +275,7 @@ The layer notebooks let you explore individual stages. Schedule the complete pip
 
 ### 5. Schedule it
 
-Open **Jobs & schedules → Create job**, choose **00 run pipeline**, select a timezone and compute target, and use **Basic** to pick a daily time. Use **Run now** to check the saved job. Its runs appear under that notebook in **Run history**.
+Open **Jobs & schedules â†’ Create job**, choose **00 run pipeline**, select a timezone and compute target, and use **Basic** to pick a daily time. Use **Run now** to check the saved job. Its runs appear under that notebook in **Run history**.
 
 ### Bring in later Git changes
 
@@ -346,7 +358,7 @@ In **Connections**, add a named **SQL Server** connection with server, port, dat
 
 Encryption and certificate verification default to enabled. The database must be reachable from the selected compute host. Inside a container, `localhost` means that container; use the database's reachable address or Docker Desktop's `host.docker.internal` where applicable.
 
-Make the connection available to the selected project, then select it in **Notebook settings → Notebook connections** and save. Empty notebook connection selections expose no saved connector credentials. With a selected connection named `Reporting` and the referenced tables already created:
+Make the connection available to the selected project, then select it in **Notebook settings â†’ Notebook connections** and save. Empty notebook connection selections expose no saved connector credentials. With a selected connection named `Reporting` and the referenced tables already created:
 
 ~~~python
 db = connections.sqlserver("Reporting")
@@ -449,10 +461,10 @@ Use named SQL Server connections for database queries. Unity Catalog coordinates
 
 ~~~mermaid
 flowchart LR
-    Browser["Remote browser"] --> Management["Management<br/>UI · accounts · Git · schedules · history"]
-    Management --> Local["Bundled compute<br/>Python · Spark · execution queue"]
+    Browser["Remote browser"] --> Management["Management<br/>UI Â· accounts Â· Git Â· schedules Â· history"]
+    Management --> Local["Bundled compute<br/>Python Â· Spark Â· execution queue"]
     Management --> Remote["Remote compute services<br/>Independent hosts and volumes"]
-    Management --> Data[("Workspace volume<br/>Metadata · notebooks · wheels")]
+    Management --> Data[("Workspace volume<br/>Metadata Â· notebooks Â· wheels")]
     Local --> Data
     Local -.-> Storage[("Optional SeaweedFS<br/>or another S3 endpoint")]
     Remote -.-> Storage
@@ -488,7 +500,7 @@ Management and compute default to **1 GB** and **4 GB** limits, with no extra sw
 
 Interactive workers retain their state until stopped, evicted for capacity, or idle for **15 minutes**. Job workers exit after their run. Notebook definitions, installed wheels, files, and persistent tables survive; Python variables and temporary views do not survive worker eviction.
 
-Under **Compute clusters → Worker sessions**, inspect sessions and edit the compute policy. Defaults admit one active run, up to eight retained sessions, a 3,072 MB worker pool, and 2,048 MB per worker. Increase concurrency only when the host and workload fit. Per-project concurrency/memory budgets and priorities control admission; they do not reserve RAM. A process-tree memory monitor terminates an over-budget worker, and Docker enforces the aggregate 4 GB ceiling. Monitor sampling can briefly overshoot a worker budget. These trusted workers share the compute account and filesystem; they are separate processes, not separate security containers.
+Under **Compute clusters â†’ Worker sessions**, inspect sessions and edit the compute policy. Defaults admit one active run, up to eight retained sessions, a 3,072 MB worker pool, and 2,048 MB per worker. Increase concurrency only when the host and workload fit. Per-project concurrency/memory budgets and priorities control admission; they do not reserve RAM. A process-tree memory monitor terminates an over-budget worker, and Docker enforces the aggregate 4 GB ceiling. Monitor sampling can briefly overshoot a worker budget. These trusted workers share the compute account and filesystem; they are separate processes, not separate security containers.
 
 The local Hive metastore permits one Spark owner at a time. Spark work waits for that lease, and an idle previous owner can be released. Python-only, DuckDB, and SQL Server workers can run concurrently when budgets permit.
 

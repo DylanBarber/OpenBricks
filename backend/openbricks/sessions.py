@@ -61,6 +61,9 @@ class SessionRuntime:
         self._legacy_process = None
         self._last_activity = time.monotonic()
         self._spark_owner = None
+        from .spark_catalog import execution_catalog
+
+        self.execution_catalog = execution_catalog()
         self.recent = deque(maxlen=32)
         self.timeout = 3600
         import os
@@ -139,6 +142,7 @@ class SessionRuntime:
         environment=None,
         provenance=None,
         resource_options=None,
+        notebook_secrets=None,
     ):
         from .environments import (
             capture_environment,
@@ -221,6 +225,7 @@ class SessionRuntime:
                 provenance=provenance,
                 resource_options=options,
                 session_id=session_id,
+                notebook_secrets=notebook_secrets,
             )
             self._sequence += 1
             self._pending[result["id"]] = {
@@ -362,6 +367,7 @@ class SessionRuntime:
         )
 
     def acquire_spark(self, kernel, run_id):
+        began, waiting = time.monotonic(), False
         with self.condition:
             while not self.stopping and not kernel.stopping:
                 if (
@@ -370,10 +376,15 @@ class SessionRuntime:
                     or kernel.process.poll() is not None
                 ):
                     return False
+                if not self.execution_catalog["shared_derby"]:
+                    kernel.has_spark = True
+                    return True
                 owner = self._spark_owner
                 if owner is None or owner is kernel:
                     self._spark_owner = kernel
                     kernel.has_spark = True
+                    if waiting:
+                        self._spark_wait(kernel, run_id, began, finished=True)
                     return True
                 owner_active = any(
                     item["session_id"] == owner.session_info["id"]
@@ -383,9 +394,26 @@ class SessionRuntime:
                     self._evict(owner, "local_catalog_handoff")
                     self._spark_owner = kernel
                     kernel.has_spark = True
+                    if waiting:
+                        self._spark_wait(kernel, run_id, began, finished=True)
                     return True
+                if not waiting:
+                    self._spark_wait(kernel, run_id, began)
+                    waiting = True
                 self.condition.wait(0.2)
             return False
+
+    def _spark_wait(self, kernel, run_id, began, finished=False):
+        with kernel.state_lock:
+            run = getattr(kernel, "_running_run", None)
+            if run is not None and run["id"] == run_id:
+                run["profile"]["spark_wait_ms"] = round(
+                    (time.monotonic() - began) * 1000
+                )
+                run["profile"]["wait_reason"] = (
+                    None if finished else "Waiting for the local Hive catalog owner"
+                )
+                self.store.put("runs", run)
 
     def finished(self, kernel, run_id):
         with self.condition:
@@ -545,7 +573,13 @@ class SessionRuntime:
                 "queued_runs": self.queue.qsize(),
                 "memory_reserved_mb": sum(value["memory_mb"] for value in sessions),
                 "memory_enforcement": "process-tree-rss-guard-and-container-ceiling",
-                "local_spark_catalog_concurrency": 1,
+                "local_spark_catalog_concurrency": (
+                    1
+                    if self.execution_catalog["shared_derby"]
+                    else self.policy["max_concurrent"]
+                ),
+                "spark_catalog_mode": self.execution_catalog["mode"],
+                "spark_default_catalog": self.execution_catalog["default_catalog"],
             }
 
     def stop_session(self, identifier):

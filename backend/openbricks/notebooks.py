@@ -1,10 +1,23 @@
 """Portable Jupyter and Databricks source notebook interchange."""
+
 from __future__ import annotations
 
 import json
 import re
 from pathlib import Path
 from uuid import uuid4
+
+
+def validate_source_size(cells):
+    if not isinstance(cells, list) or len(cells) > 500:
+        raise ValueError("A notebook supports at most 500 cells")
+    if (
+        sum(len(str(cell.get("source", "")).encode("utf-8")) for cell in cells)
+        > 10_000_000
+    ):
+        raise ValueError(
+            "Notebook cell sources must fit within the 10 MB execution limit"
+        )
 
 
 def new_cell(language="python", source=""):
@@ -18,7 +31,9 @@ def parse_notebook(filename: str, content: bytes):
     suffix = Path(filename).suffix.lower()
     if suffix == ".ipynb":
         document = json.loads(text)
-        if not isinstance(document, dict) or not isinstance(document.get("cells"), list):
+        if not isinstance(document, dict) or not isinstance(
+            document.get("cells"), list
+        ):
             raise ValueError("Not a Jupyter notebook")
         cells = []
         for original in document["cells"]:
@@ -31,7 +46,9 @@ def parse_notebook(filename: str, content: bytes):
                 source = "".join(source)
             if not isinstance(source, str):
                 raise ValueError("Notebook cell source must contain text")
-            language = "markdown" if original.get("cell_type") == "markdown" else "python"
+            language = (
+                "markdown" if original.get("cell_type") == "markdown" else "python"
+            )
             if source.lstrip().startswith("%%sql"):
                 language, source = "sql", source.lstrip()[5:].lstrip("\r\n")
             cells.append(new_cell(language, source))
@@ -46,9 +63,13 @@ def parse_notebook(filename: str, content: bytes):
             lines = [re.sub(r"^# MAGIC ?", "", line) for line in lines]
             chunk = "\n".join(lines)
             cell_language = language
-            for magic, magic_language in (("%sql", "sql"), ("%python", "python"), ("%md", "markdown")):
+            for magic, magic_language in (
+                ("%sql", "sql"),
+                ("%python", "python"),
+                ("%md", "markdown"),
+            ):
                 if chunk.startswith(magic):
-                    chunk = chunk[len(magic):].lstrip("\r\n ")
+                    chunk = chunk[len(magic) :].lstrip("\r\n ")
                     cell_language = magic_language
                     break
             cells.append(new_cell(cell_language, chunk))
@@ -58,7 +79,12 @@ def parse_notebook(filename: str, content: bytes):
         cells = [new_cell()]
     if len(cells) > 500:
         raise ValueError("Notebook may contain at most 500 cells")
-    return {"name": Path(filename).stem.replace("_", " "), "language": "python", "description": "", "cells": cells}
+    return {
+        "name": Path(filename).stem.replace("_", " "),
+        "language": "python",
+        "description": "",
+        "cells": cells,
+    }
 
 
 def export_notebook(notebook):
@@ -68,8 +94,23 @@ def export_notebook(notebook):
         if cell["language"] == "sql":
             source = "%%sql\n" + source
         kind = "markdown" if cell["language"] == "markdown" else "code"
-        entry = {"cell_type": kind, "metadata": {}, "source": source.splitlines(keepends=True)}
+        entry = {
+            "cell_type": kind,
+            "metadata": {},
+            "source": source.splitlines(keepends=True),
+        }
         if kind == "code":
             entry.update(execution_count=None, outputs=[])
         cells.append(entry)
-    return {"nbformat": 4, "nbformat_minor": 5, "metadata": {"kernelspec": {"display_name": "OpenBricks Python + Spark SQL", "language": "python", "name": "python3"}}, "cells": cells}
+    return {
+        "nbformat": 4,
+        "nbformat_minor": 5,
+        "metadata": {
+            "kernelspec": {
+                "display_name": "OpenBricks Python + Spark SQL",
+                "language": "python",
+                "name": "python3",
+            }
+        },
+        "cells": cells,
+    }

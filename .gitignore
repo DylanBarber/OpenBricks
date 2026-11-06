@@ -38,6 +38,7 @@ build/
 dist/
 *.egg-info/
 compose.override.yaml
+.opencode/
 compose.override.yml
 docker-compose.override.yaml
 docker-compose.override.yml

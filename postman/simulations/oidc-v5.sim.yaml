@@ -1,0 +1,16 @@
+# Simulation scaffold. Add fault-injection scenarios under each mock, e.g.:
+#   scenarios:
+#     - overrides:
+#         conditions:
+#           latency: { delay_ms: 500 }
+# Then serve it with: postman simulation run <this file>
+
+simulation: OpenBricks OIDC verification
+routing: path
+mocks:
+  - name: OpenBricks OIDC provider
+    routeKey: oidc
+    origin:
+      - oidc.openbricks.test
+    interceptRequests: true
+    path: postman/mocks/oidc-v5

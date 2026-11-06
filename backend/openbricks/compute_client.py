@@ -46,6 +46,30 @@ def pending_runs(store, cluster_id=None):
         return [json.loads(row[0]) for row in db.execute(sql, params).fetchall()]
 
 
+def merge_remote_expiry(run, remote):
+    """An expired remote tombstone must not present a partial profile as final."""
+    if not remote.get("outputs_expired"):
+        return
+    run["outputs_expired"] = True
+    if remote.get("compute_outputs_expired_at"):
+        run["compute_outputs_expired_at"] = remote["compute_outputs_expired_at"]
+    for field in (
+        "outputs",
+        "logs",
+        "data_result",
+        "data_events",
+        "quality_reports",
+        "lineage",
+        "profile",
+    ):
+        if field in remote:
+            run[field] = remote[field]
+        elif field in ("outputs", "logs"):
+            run[field] = []
+        else:
+            run.pop(field, None)
+
+
 class QueueView:
     def __init__(self, runtime):
         self.runtime = runtime
@@ -71,6 +95,7 @@ class ClusterRuntime:
         self._active = {}
         self._run_locks = {}
         self._connection_snapshots = {}
+        self._secret_snapshots = {}
         self.queue = QueueView(self)
         self.started = False
         self._timeout = int(os.getenv("OPENBRICKS_RUN_TIMEOUT", "3600"))
@@ -145,6 +170,7 @@ class ClusterRuntime:
         run_id=None,
         connections=None,
         resource_options=None,
+        notebook_secrets=None,
     ):
         selected = cluster_id or notebook.get("cluster_id") or "local"
         with self.state_lock:
@@ -176,6 +202,7 @@ class ClusterRuntime:
                     run_id=run_id,
                     connections=connections,
                     resource_options=resource_options,
+                    notebook_secrets=notebook_secrets,
                 )
             entry = cluster_record(self.store, selected)
             if not entry.get("url"):
@@ -276,6 +303,8 @@ class ClusterRuntime:
             self.store.put("runs", run)
             if connections is not None:
                 self._connection_snapshots[run["id"]] = connections
+            if notebook_secrets is not None:
+                self._secret_snapshots[run["id"]] = notebook_secrets
             self._enqueue(run)
             return run
 
@@ -490,6 +519,7 @@ class ClusterRuntime:
                     with self.state_lock:
                         self._active.pop(run_id, None)
                         self._connection_snapshots.pop(run_id, None)
+                        self._secret_snapshots.pop(run_id, None)
                     continue
                 self._execute(run, selected, poll_once=True)
                 with self.store.connect() as db:
@@ -504,6 +534,7 @@ class ClusterRuntime:
                     with self.state_lock:
                         self._active.pop(run_id, None)
                         self._connection_snapshots.pop(run_id, None)
+                        self._secret_snapshots.pop(run_id, None)
                 self.stopped.wait(0.01)
             self.stopped.wait(0.05)
 
@@ -516,10 +547,18 @@ class ClusterRuntime:
             if not run.get("_remote_submitted"):
                 self._sync_packages(entry, run.get("_environment"))
             connections = []
+            notebook_secrets = []
             if not run.get("_remote_submitted"):
                 connections = self._connection_snapshots.get(run_id)
                 if connections is None:
                     connections = connection_snapshot(self.store, run["_notebook"])
+                notebook_secrets = self._secret_snapshots.get(run_id)
+                if notebook_secrets is None:
+                    from .notebook_secrets import secrets_for_runtime
+
+                    notebook_secrets = secrets_for_runtime(
+                        self.store, run["_notebook"], owner_id=run.get("owner_id")
+                    )
             payload = {
                 "run_id": run_id,
                 "notebook": run["_notebook"],
@@ -527,6 +566,7 @@ class ClusterRuntime:
                 "trigger": run["trigger"],
                 "job_id": run.get("job_id"),
                 "connections": connections,
+                "notebook_secrets": notebook_secrets,
                 "parameters": run.get("parameters", {}),
                 "timeout_seconds": run.get("timeout_seconds", self._timeout),
                 "environment": run.get("_environment"),
@@ -571,6 +611,7 @@ class ClusterRuntime:
                 # No connection secrets are retained in durable run metadata.
                 payload.clear()
                 connections = None
+                notebook_secrets = None
                 while not self.stopped.is_set():
                     try:
                         response = client.get(f"/runs/{run_id}")
@@ -626,11 +667,13 @@ class ClusterRuntime:
                             "session_id",
                             "owner_id",
                             "queued_reason",
+                            "profile",
                         ):
                             if field in remote:
                                 run[field] = remote[field]
                         if remote.get("created_at"):
                             run["compute_created_at"] = remote["created_at"]
+                        merge_remote_expiry(run, remote)
                         run["error"] = remote.get("error")
                         if run["status"] == "running":
                             self._active[run_id] = run_id

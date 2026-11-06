@@ -23,7 +23,7 @@ docker compose logs -f openbricks compute
 
 Open `http://localhost:3000`, or the same port on the host's reachable address. Put HTTPS in front of the UI for access outside a trusted local network and enable `OPENBRICKS_SECURE_COOKIE=true` when HTTPS is in use.
 
-The management container sends notebook source to the chosen compute service over an authenticated API. Each service admits worker processes according to its concurrency, total memory, and project policies. The default remains one active run. Interactive workers belong to a project/user/notebook/environment; job workers are fresh and exit after completion. Configure policies and inspect or stop sessions under **Compute clusters → Worker sessions**. The bundled local Hive warehouse allows one Spark-owning worker at a time; Python-only, SQL Server, and DuckDB workers can overlap within configured budgets.
+The management container sends notebook source to the chosen compute service over an authenticated API. Each service admits worker processes according to its concurrency, total memory, and project policies. The default remains one active run. Interactive workers belong to a project/user/notebook/environment; job workers are fresh and exit after completion. Configure policies and inspect or stop sessions under **Compute clusters â†’ Worker sessions**. The bundled local Hive warehouse allows one Spark-owning worker at a time; Python-only, SQL Server, and DuckDB workers can overlap within configured budgets.
 
 Compute releases idle workers after 900 seconds (15 minutes), and can evict an idle session earlier to admit waiting work. This releases its Python process and any Spark JVM. In-memory variables and temporary views do not survive eviction; notebooks, installed wheels, files, and persistent tables remain in their volumes. `OPENBRICKS_IDLE_TIMEOUT_SECONDS` sets the initial policy default; saved UI policies take precedence. Worker budgets use a process-tree RSS monitor, with the Docker cgroup enforcing the aggregate ceiling. Workers share the compute account and filesystem and are not untrusted-code sandboxes.
 
@@ -135,11 +135,11 @@ The Operations screen creates streamed local backups, optionally encrypted. **Ba
 Prebuilt release images are published on Docker Hub as [darbs5342/openbricks](https://hub.docker.com/r/darbs5342/openbricks) for management and [darbs5342/openbricks-compute](https://hub.docker.com/r/darbs5342/openbricks-compute) for compute. To use the matching stable images, set these values in your existing `.env`:
 
 ```dotenv
-OPENBRICKS_RUNTIME_IMAGE=darbs5342/openbricks:0.4.0
-OPENBRICKS_COMPUTE_IMAGE=darbs5342/openbricks-compute:0.4.0
+OPENBRICKS_RUNTIME_IMAGE=darbs5342/openbricks:0.5.0
+OPENBRICKS_COMPUTE_IMAGE=darbs5342/openbricks-compute:0.5.0
 ```
 
-GHCR images remain supported. To use GHCR instead, set the same two variables to `ghcr.io/dylanbarber/openbricks:0.4.0` and `ghcr.io/dylanbarber/openbricks-compute:0.4.0`, respectively.
+GHCR images remain supported. To use GHCR instead, set the same two variables to `ghcr.io/dylanbarber/openbricks:0.5.0` and `ghcr.io/dylanbarber/openbricks-compute:0.5.0`, respectively.
 
 Before an upgrade, back up local data and separate storage/catalog volumes. Stop new submissions and wait for active work to finish. The first start migrates existing records into the shared default project; legacy members retain editor access there. Review assignments before inviting more users. Use matching management/compute versions and retain old images needed by pinned environments. A code rollback alone does not undo metadata changes; use a validated pre-upgrade backup if restoring an older release. See [release process](docs/RELEASING.md).
 

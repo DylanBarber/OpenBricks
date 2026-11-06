@@ -1,0 +1,177 @@
+.toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: end;
+  margin: 20px 0;
+}
+.toolbar label {
+  min-width: 200px;
+}
+.note {
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.6;
+}
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 360px), 1fr));
+  gap: 16px;
+}
+.card {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface);
+  padding: 18px;
+  min-width: 0;
+}
+.cardHead {
+  display: flex;
+  justify-content: space-between;
+  align-items: start;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+.cardHead h3 {
+  margin: 0 0 6px;
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  overflow-wrap: anywhere;
+}
+.cardHead p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+.actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.keyList {
+  display: grid;
+  gap: 0;
+  padding: 0;
+  margin: 12px 0;
+  list-style: none;
+}
+.keyList li {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 0;
+  border-top: 1px solid var(--line);
+}
+.keyList code {
+  overflow-wrap: anywhere;
+}
+.keyList small {
+  display: block;
+  font-size: 11px;
+  color: var(--muted);
+  margin-top: 4px;
+}
+.emptyKeys {
+  color: var(--muted);
+  font-size: 13px;
+  padding: 10px 0;
+}
+.roles {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  border: 0;
+  padding: 0;
+  margin: 16px 0;
+}
+.roles legend {
+  font-size: 13px;
+  margin-bottom: 8px;
+}
+.roles label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+}
+.roles input {
+  width: auto;
+}
+.form {
+  display: grid;
+  gap: 14px;
+}
+.footer {
+  display: flex;
+  justify-content: end;
+  gap: 8px;
+  padding-top: 16px;
+}
+.error {
+  border: 1px solid var(--coral);
+  border-radius: 8px;
+  padding: 12px;
+  margin: 12px 0;
+  color: var(--coral);
+  font-size: 13px;
+}
+.success {
+  color: var(--green);
+  font-size: 13px;
+  margin: 10px 0;
+}
+.chips {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin: 12px 0;
+}
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+.checkList {
+  display: grid;
+  max-height: 280px;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  margin: 12px 0;
+}
+.checkList label {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--line);
+  font-size: 13px;
+}
+.checkList label:last-child {
+  border-bottom: 0;
+}
+.checkList input {
+  width: auto;
+}
+.login {
+  display: grid;
+  gap: 12px;
+  margin-top: 16px;
+}
+.login a {
+  justify-content: center;
+  text-decoration: none;
+}

@@ -1,6 +1,7 @@
 "use client";
 import { Activity, AlertTriangle, FileCode2 } from "lucide-react";
 import { bytes, date, type Run } from "@/lib/api";
+import { RunProfiler } from "./run-profiler";
 export function RunActivity({ run }: { run: Run }) {
   const commit = run.provenance?.commit || run.source_commit,
     releaseId = run.provenance?.release_id || run.release_id;
@@ -97,6 +98,7 @@ export function RunActivity({ run }: { run: Run }) {
           <pre>{JSON.stringify(run.quality_reports, null, 2)}</pre>
         </details>
       ) : null}
+      <RunProfiler run={run} />
     </section>
   );
 }

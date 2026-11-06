@@ -196,7 +196,7 @@ def cron_trigger(expression, timezone_name):
                 start = int(base)
                 end = 7 if step_value else start
             if not 0 <= start <= end <= 7:
-                raise ValueError("Cron weekday numbers must be 0â€“7")
+                raise ValueError("Cron weekday numbers must be 0Ã¢â‚¬â€œ7")
             days.update(value % 7 for value in range(start, end + 1, step))
         fields[4] = ",".join(names[day] for day in sorted(days))
     return CronTrigger.from_crontab(" ".join(fields), timezone=timezone_name)
@@ -275,6 +275,9 @@ def create_app(data_dir=None):
             store.put("settings", {"id": "initialized", "created_at": now()})
         app.state.access = Access(store)
         app.state.access.seed()
+        from .collaboration import Collaboration
+
+        app.state.collaboration = Collaboration(store)
         app.state.runtime = Runtime(store)
         from .workflows import WorkflowManager
 
@@ -304,6 +307,11 @@ def create_app(data_dir=None):
         app.state.backup_automation = BackupAutomation(app)
         app.state.started = time.monotonic()
         app.state.login_attempts = defaultdict(deque)
+        from .assets import AssetService
+        from .dashboards import DashboardManager
+
+        app.state.assets = AssetService(store, app.state.access)
+        app.state.dashboards = DashboardManager(app, cron_factory=cron_trigger)
         app.state.runtime.start()
         app.state.workflows.start()
         if os.getenv("OPENBRICKS_RECOVERY_DRILL") != "1":
@@ -314,6 +322,8 @@ def create_app(data_dir=None):
 
             app.state.scheduler.add_listener(scheduled_submission, EVENT_JOB_SUBMITTED)
         app.state.scheduler.start()
+        if os.getenv("OPENBRICKS_RECOVERY_DRILL") != "1":
+            app.state.dashboards.start()
         app.state.operations.start()
         if os.getenv("OPENBRICKS_RECOVERY_DRILL") != "1":
             app.state.notifications.start()
@@ -338,6 +348,7 @@ def create_app(data_dir=None):
         try:
             yield
         finally:
+            app.state.dashboards.close()
             app.state.backup_automation.close()
             app.state.automation.close()
             app.state.operations.close()
@@ -348,7 +359,7 @@ def create_app(data_dir=None):
 
     app = FastAPI(
         title="OpenBricks",
-        version="0.4.0",
+        version="0.5.0",
         lifespan=lifespan,
         docs_url=None,
         redoc_url=None,
@@ -441,8 +452,14 @@ def create_app(data_dir=None):
         if not session or session["expires_at"] < now():
             raise HTTPException(401, "Session expired. Sign in again")
         user = store.get("users", session["user_id"])
-        if not user:
+        if not user or user.get("disabled"):
             raise HTTPException(401, "User account no longer exists")
+        if user.get("auth_provider") == "oidc":
+            service = getattr(request.app.state, "oidc", None)
+            if not service or user.get("_oidc_issuer") != service.config.issuer:
+                raise HTTPException(
+                    401, "Single sign-on configuration changed. Sign in again"
+                )
         return user
 
     def admin(user=Depends(authenticated)):
@@ -539,7 +556,13 @@ def create_app(data_dir=None):
                 + "00" * 32
             ),
         )
-        if not user or not valid or user.get("is_service_account"):
+        if (
+            not user
+            or not valid
+            or user.get("is_service_account")
+            or user.get("disabled")
+            or user.get("auth_provider") == "oidc"
+        ):
             raise HTTPException(401, "Incorrect username or password")
         attempts.clear()
         token = secrets.token_urlsafe(48)
@@ -913,6 +936,11 @@ def create_app(data_dir=None):
     ):
         with request.app.state.store.lock:
             notebook = lookup(request, "notebooks", id)
+            if notebook.get("collaboration_enabled") and body.cells is not None:
+                raise HTTPException(
+                    409,
+                    "Live collaboration is enabled. Open Collaborate to edit cells, or finish cell edits and disable live collaboration",
+                )
             values = validated_notebook(body)
             if body.version is not None and body.version != notebook.get("version", 1):
                 raise HTTPException(
@@ -945,6 +973,10 @@ def create_app(data_dir=None):
                 candidate.get("project_id") or DEFAULT_PROJECT,
             )
             validate_notebook_access(user, request.app.state.store, candidate)
+            if candidate["project_id"] != (
+                notebook.get("project_id") or DEFAULT_PROJECT
+            ):
+                candidate["secret_refs"] = []
             with request.app.state.store.connect() as db:
                 has_revision = db.execute(
                     "SELECT 1 FROM documents WHERE kind='notebook_revisions' AND notebook_id=? LIMIT 1",
@@ -969,6 +1001,11 @@ def create_app(data_dir=None):
         store = request.app.state.store
         with store.lock:
             notebook = lookup(request, "notebooks", id)
+            if notebook.get("collaboration_enabled"):
+                raise HTTPException(
+                    409, "Disable live collaboration before moving a notebook"
+                )
+            original_project = notebook.get("project_id") or DEFAULT_PROJECT
             if "project_id" in body.model_fields_set and body.project_id:
                 access.require_project(user, body.project_id, "edit")
                 notebook["project_id"] = body.project_id
@@ -984,6 +1021,8 @@ def create_app(data_dir=None):
                 notebook.get("project_id") or DEFAULT_PROJECT,
             )
             validate_notebook_access(user, store, notebook)
+            if notebook["project_id"] != original_project:
+                notebook["secret_refs"] = []
             notebook["updated_at"] = now()
             notebook["version"] = notebook.get("version", 1) + 1
             store.put("notebooks", notebook)
@@ -994,14 +1033,18 @@ def create_app(data_dir=None):
     def delete_notebook(id: str, request: Request, user=Depends(authenticated)):
         store = request.app.state.store
         with store.lock:
-            lookup(request, "notebooks", id)
+            value = lookup(request, "notebooks", id)
+            if value.get("collaboration_enabled"):
+                raise HTTPException(
+                    409, "Disable live collaboration before deleting a notebook"
+                )
             if any(job.get("notebook_id") == id for job in store.list("jobs")):
                 raise HTTPException(
                     409, "Remove this notebook's schedules before deleting it"
                 )
             with store.connect() as db:
                 db.execute(
-                    "DELETE FROM documents WHERE kind='notebook_revisions' AND notebook_id=?",
+                    "DELETE FROM documents WHERE kind IN ('notebook_revisions','notebook_comments','notebook_reviews') AND notebook_id=?",
                     (id,),
                 )
                 db.execute(
@@ -1519,7 +1562,7 @@ def create_app(data_dir=None):
 
     register_workflow_routes(app, authenticated, access)
     register_release_routes(app, authenticated, access)
-    register_data_routes(app, authenticated, access)
+    app.state.data_workspace_api = register_data_routes(app, authenticated, access)
     register_operation_routes(app, authenticated, admin)
     register_notification_routes(app, authenticated, admin)
     from .automation_auth import register_automation_auth_routes
@@ -1541,6 +1584,23 @@ def create_app(data_dir=None):
     from .backup_automation import register_backup_automation_routes
 
     register_backup_automation_routes(app, authenticated, admin, access)
+    from .collaboration import register_collaboration_routes
+
+    register_collaboration_routes(app, authenticated, access, save_notebook_file)
+    from .audit import register_audit_routes
+
+    register_audit_routes(app, authenticated, access)
+    from .dashboards import register_dashboard_routes
+    from .assets import register_asset_routes
+    from .notebook_secrets import register_secret_routes
+    from .oidc import register_oidc_routes
+    from .profiling import register_profile_routes
+
+    register_dashboard_routes(app, authenticated, access)
+    register_asset_routes(app, authenticated, access)
+    register_secret_routes(app, authenticated)
+    register_oidc_routes(app)
+    register_profile_routes(app, authenticated, access)
     return app
 
 
@@ -1567,6 +1627,9 @@ def validated_notebook(body):
         raise ValueError("Supported cell languages: python, sql and markdown")
     if len({cell["id"] for cell in result["cells"]}) != len(result["cells"]):
         raise ValueError("Cell identifiers must be unique")
+    from .notebooks import validate_source_size
+
+    validate_source_size(result["cells"])
     return result
 
 

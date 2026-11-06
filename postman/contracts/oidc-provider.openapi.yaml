@@ -1,0 +1,84 @@
+openapi: 3.0.3
+info:
+  title: OpenBricks OIDC provider dependency contract
+  version: 0.5.0
+  description: Synthetic local provider contract based on OpenID Connect Core authorization-code flow with PKCE S256. This fixture has no real users or external credentials.
+servers:
+  - url: http://127.0.0.1:4612/oidc
+paths:
+  /.well-known/openid-configuration:
+    get:
+      operationId: discovery
+      responses:
+        '200':
+          description: Exact issuer, authorization/token/JWKS endpoints and supported algorithms
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [issuer, authorization_endpoint, token_endpoint, jwks_uri]
+                properties:
+                  issuer: {type: string}
+                  authorization_endpoint: {type: string}
+                  token_endpoint: {type: string}
+                  jwks_uri: {type: string}
+  /authorize:
+    get:
+      operationId: authorize
+      parameters:
+        - {in: query, name: client_id, required: true, schema: {type: string}}
+        - {in: query, name: redirect_uri, required: true, schema: {type: string}}
+        - {in: query, name: response_type, required: true, schema: {type: string, enum: [code]}}
+        - {in: query, name: scope, required: true, schema: {type: string}}
+        - {in: query, name: state, required: true, schema: {type: string}}
+        - {in: query, name: nonce, required: true, schema: {type: string}}
+        - {in: query, name: code_challenge, required: true, schema: {type: string}}
+        - {in: query, name: code_challenge_method, required: true, schema: {type: string, enum: [S256]}}
+      responses:
+        '302': {description: Callback redirect containing a one-use code and the original state}
+        '400': {description: Invalid client, callback, PKCE challenge or authorization parameters}
+  /token:
+    post:
+      operationId: token
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required: [grant_type, code, client_id, redirect_uri, code_verifier]
+              properties:
+                grant_type: {type: string, enum: [authorization_code]}
+                code: {type: string}
+                client_id: {type: string}
+                redirect_uri: {type: string}
+                code_verifier: {type: string}
+      responses:
+        '200':
+          description: Signed nonce-bound ID token and synthetic access token
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [id_token, access_token, token_type]
+                properties:
+                  id_token: {type: string}
+                  access_token: {type: string}
+                  token_type: {type: string, enum: [Bearer]}
+        '400': {description: Expired, replayed or incorrectly verified authorization code}
+        '500': {description: Provider failure scenario}
+  /jwks:
+    get:
+      operationId: jwks
+      responses:
+        '200':
+          description: Public RSA signing key; private key remains in provider process memory
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [keys]
+                properties:
+                  keys:
+                    type: array
+                    items: {type: object}

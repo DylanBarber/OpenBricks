@@ -1,0 +1,109 @@
+.v5-collaboration {
+  padding: 20px;
+  max-height: 82vh;
+  overflow: auto;
+}
+.v5-room-heading,
+.v5-cell-heading,
+.v5-comment > div:first-child {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.v5-room-heading p,
+.v5-cell-heading small,
+.v5-save-state {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.v5-collaboration-columns {
+  display: grid;
+  grid-template-columns: minmax(0, 1.65fr) minmax(280px, 1fr);
+  gap: 24px;
+  margin-top: 20px;
+}
+.v5-live-cell,
+.v5-comment {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 14px;
+  margin: 12px 0;
+  background: var(--surface);
+}
+.v5-live-cell pre {
+  max-height: 240px;
+  overflow: auto;
+  white-space: pre-wrap;
+  font-size: 12px;
+}
+.v5-cell-heading {
+  margin-bottom: 12px;
+}
+.v5-save-state {
+  font-size: 12px;
+  margin-top: 8px;
+  color: var(--muted);
+}
+.v5-comment p {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.v5-comment.reply {
+  margin-left: 18px;
+  border-left: 3px solid var(--accent);
+}
+.v5-comment small {
+  font-size: 11px;
+  color: var(--muted);
+}
+.v5-inline-actions,
+.v5-reply-note {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-top: 10px;
+}
+.v5-collaboration textarea {
+  width: 100%;
+  resize: vertical;
+}
+.v5-collaboration aside form {
+  margin: 16px 0;
+}
+.v5-collaboration .pagination {
+  flex-wrap: wrap;
+  font-size: 11px;
+  gap: 8px;
+}
+.v5-collaboration .segmented {
+  display: flex;
+  gap: 8px;
+}
+.v5-collaboration .segmented button {
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  border-radius: 7px;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+.v5-collaboration .segmented button.active {
+  background: var(--accent);
+  color: white;
+}
+.v5-collaboration h3 {
+  margin: 0;
+}
+@media (max-width: 850px) {
+  .v5-collaboration-columns {
+    grid-template-columns: 1fr;
+  }
+  .v5-room-heading {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+}

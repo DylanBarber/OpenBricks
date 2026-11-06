@@ -1,0 +1,16 @@
+version: 1
+id: 1f2e970b-4e45-4eec-ab91-63d2e6c68ddb
+name: OpenBricks OIDC provider
+slug: openbricks-oidc-provider
+protocol: http
+port: 4613
+interceptRequests: true
+origin: oidc.openbricks.test
+scenarios:
+  - name: default
+    path: ./oidc.js
+    default: true
+generatedFrom:
+  type: spec
+  mode: static
+  path: ../../contracts/oidc-provider.openapi.yaml

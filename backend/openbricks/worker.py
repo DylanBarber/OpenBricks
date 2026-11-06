@@ -15,6 +15,7 @@ import math
 import os
 import pprint
 import sys
+import threading
 import time
 import traceback
 from pathlib import Path
@@ -27,6 +28,8 @@ MAX_ROWS = 200
 MAX_OUTPUT = 100_000
 _spark = None
 _spark_lease = None
+_active_profiler = None
+_secret_history = None
 _scopes: dict[str, dict[str, Any]] = {}
 
 
@@ -83,16 +86,13 @@ def spark_session(data_dir: str):
         root = Path(data_dir).resolve()
         warehouse = root / "warehouse"
         warehouse.mkdir(parents=True, exist_ok=True)
-        metastore = prepare_metastore_path(root)
-        # A single worker owns this local Derby metastore and SparkContext.
+        from .spark_catalog import execution_catalog
+
+        mode = execution_catalog()
         builder = (
             SparkSession.builder.appName("OpenBricks")
             .master(os.environ.get("SPARK_MASTER", "local[*]"))
             .config("spark.sql.warehouse.dir", warehouse.as_uri())
-            .config(
-                "spark.hadoop.javax.jdo.option.ConnectionURL",
-                f"jdbc:derby:;databaseName={metastore};create=true",
-            )
             .config(
                 "spark.driver.bindAddress",
                 os.environ.get("SPARK_DRIVER_BIND_ADDRESS", "127.0.0.1"),
@@ -102,16 +102,28 @@ def spark_session(data_dir: str):
             )
             .config("spark.driver.memory", os.environ.get("SPARK_DRIVER_MEMORY", "1g"))
             .config("spark.ui.enabled", "false")
+            .config("spark.ui.retainedJobs", "128")
+            .config("spark.ui.retainedStages", "256")
+            .config("spark.sql.ui.retainedExecutions", "64")
             .config(
                 "spark.sql.shuffle.partitions",
                 os.environ.get("SPARK_SHUFFLE_PARTITIONS", "8"),
             )
-            .enableHiveSupport()
         )
+        if mode["shared_derby"]:
+            metastore = prepare_metastore_path(root)
+            builder = builder.config(
+                "spark.hadoop.javax.jdo.option.ConnectionURL",
+                f"jdbc:derby:;databaseName={metastore};create=true",
+            ).enableHiveSupport()
+        else:
+            builder = builder.config("spark.sql.catalogImplementation", "in-memory")
         from .spark_catalog import configure_catalog
 
         _spark = configure_catalog(builder).getOrCreate()
         _spark.sparkContext.setLogLevel("WARN")
+    if _active_profiler is not None:
+        _active_profiler.bind(_spark)
     return _spark
 
 
@@ -120,7 +132,17 @@ class SparkProxy:
         self._data_dir = data_dir
 
     def __getattr__(self, name: str):
-        return getattr(spark_session(self._data_dir), name)
+        value = getattr(spark_session(self._data_dir), name)
+        if name == "sql":
+
+            def sql(*args, **kwargs):
+                frame = value(*args, **kwargs)
+                if _active_profiler is not None:
+                    _active_profiler.plan(frame)
+                return frame
+
+            return sql
+        return value
 
     def __repr__(self):
         return "<OpenBricks local Spark session (initialized on first Spark operation)>"
@@ -208,6 +230,8 @@ def execute_cell(
     }
 
     def display(value: Any) -> None:
+        if _active_profiler is not None:
+            _active_profiler.plan(value)
         result = table(value)
         if result is not None:
             output["result"] = result
@@ -262,7 +286,7 @@ def execute_cell(
 
 
 def run_request(request: dict, emit) -> None:
-    global _spark_lease
+    global _spark_lease, _active_profiler, _secret_history
     run_id = request["run_id"]
     if os.getenv("OPENBRICKS_SPARK_LEASE_PROTOCOL") == "1":
 
@@ -319,14 +343,81 @@ def run_request(request: dict, emit) -> None:
     from .connectors import ConnectionRegistry
 
     scope["connections"] = ConnectionRegistry(request.get("connections", []))
+    from .secret_runtime import SecretRegistry, RedactionHistory
+
+    secret_values = request.get("notebook_secrets", [])
+    registry = SecretRegistry(secret_values)
+    scope["notebook_secrets"] = registry
+    scope["dbutils"].secrets = registry
+    if _secret_history is None:
+        _secret_history = RedactionHistory()
+    known_values = [
+        *secret_values,
+        *(
+            {"value": str(value)}
+            for item in request.get("connections", [])
+            for value in item.get("secrets", {}).values()
+            if value is not None and str(value)
+        ),
+    ]
+    historical = _secret_history.include(known_values)
     from .spark_catalog import SparkCatalogHelper
 
     scope["catalog"] = SparkCatalogHelper(lambda: spark_session(data_dir))
     from .execution import Redactor
 
-    redactor = Redactor(request.get("connections", []))
+    redactor = Redactor([*request.get("connections", []), *historical])
     raw_emit = emit
-    emit = lambda event: raw_emit(redactor.event(event))
+
+    def emit(event):
+        safe = redactor.event(event)
+        if event.get("type") == "profile":
+            from .profiling import redact_spark_profile
+
+            safe["spark"] = redact_spark_profile(event["spark"], redactor)
+        raw_emit(safe)
+
+    from .profiling import SparkProfiler
+
+    profiler = SparkProfiler(run_id, lambda: _spark)
+    _active_profiler = profiler
+    profile_stop = threading.Event()
+
+    def profile_event():
+        snapshot = profiler.collect()
+        if not profile_stop.is_set():
+            emit({"type": "profile", "run_id": run_id, "spark": snapshot})
+
+    def collect_profile():
+        while not profile_stop.wait(2):
+            profile_event()
+
+    profile_thread = threading.Thread(
+        target=collect_profile, daemon=True, name="openbricks-spark-profiler"
+    )
+    profile_thread.start()
+    try:
+        error = _execute_profiled_cells(
+            request, scope, data_dir, run_id, emit, profiler, profile_event, redactor
+        )
+    finally:
+        profile_stop.set()
+        profile_thread.join(timeout=1)
+        emit({"type": "profile", "run_id": run_id, "spark": profiler.collect()})
+        _active_profiler = None
+    emit(
+        {
+            "type": "done",
+            "run_id": run_id,
+            "status": "failed" if error else "succeeded",
+            "error": error,
+        }
+    )
+
+
+def _execute_profiled_cells(
+    request, scope, data_dir, run_id, emit, profiler, profile_event, redactor
+):
     try:
         from .data_workspace import ComputeDataWorkspace
     except ImportError:
@@ -342,6 +433,7 @@ def run_request(request: dict, emit) -> None:
         )
     error = None
     for index, cell in enumerate(request["cells"]):
+        profiler.cell(cell["id"])
         emit(
             {
                 "type": "progress",
@@ -378,17 +470,11 @@ def run_request(request: dict, emit) -> None:
         for stream in pending_logs:
             on_log(stream, "", final=True)
         emit({"type": "cell", "run_id": run_id, "output": output})
+        profile_event()
         if output["status"] == "failed":
             error = output["stderr"]
             break
-    emit(
-        {
-            "type": "done",
-            "run_id": run_id,
-            "status": "failed" if error else "succeeded",
-            "error": error,
-        }
-    )
+    return error
 
 
 def main() -> None:
@@ -400,11 +486,14 @@ def main() -> None:
     os.dup2(sys.stderr.fileno(), sys.stdout.fileno())
 
     def emit(message: dict) -> None:
-        protocol.write(
-            json.dumps(serializable(message), default=serializable, allow_nan=False)
-            + "\n"
-        )
-        protocol.flush()
+        with protocol_lock:
+            protocol.write(
+                json.dumps(serializable(message), default=serializable, allow_nan=False)
+                + "\n"
+            )
+            protocol.flush()
+
+    protocol_lock = threading.Lock()
 
     try:
         for line in sys.stdin:
@@ -416,7 +505,12 @@ def main() -> None:
                 from .execution import Redactor
 
                 emit(
-                    Redactor(request.get("connections", [])).event(
+                    Redactor(
+                        [
+                            *request.get("connections", []),
+                            *(_secret_history.include() if _secret_history else []),
+                        ]
+                    ).event(
                         {
                             "type": "done",
                             "run_id": request.get("run_id"),

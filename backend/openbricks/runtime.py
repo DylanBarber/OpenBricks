@@ -46,6 +46,10 @@ class SingleSessionRuntime:
         self.last_activity = time.monotonic()
         self.log = None
         self._connection_snapshots = {}
+        self._secret_snapshots = {}
+        self._redaction_history = None
+        self._running_run = None
+        self._stderr_thread = None
         self.current_environment = None
         self.current_project = None
         for run in self.store.active_runs() if recover else []:
@@ -85,6 +89,7 @@ class SingleSessionRuntime:
         provenance=None,
         resource_options=None,
         session_id=None,
+        notebook_secrets=None,
     ):
         with self.state_lock:
             if self.stopping:
@@ -108,6 +113,7 @@ class SingleSessionRuntime:
                 provenance,
                 resource_options,
                 session_id,
+                notebook_secrets,
             )
 
     @contextmanager
@@ -142,6 +148,7 @@ class SingleSessionRuntime:
         provenance=None,
         resource_options=None,
         session_id=None,
+        notebook_secrets=None,
     ):
         if run_id:
             previous = self.store.get("runs", run_id)
@@ -186,6 +193,8 @@ class SingleSessionRuntime:
 
         if self.queue.qsize() >= 100:
             raise ValueError("Run queue is full; wait for a run to finish")
+        from .profiling import new_profile
+
         run = {
             "id": run_id or uuid4().hex,
             "notebook_id": notebook["id"],
@@ -224,10 +233,13 @@ class SingleSessionRuntime:
             "progress": {"total_cells": len(cells)},
             "peak_memory_bytes": 0,
             "error_class": None,
+            "profile": new_profile(),
         }
         self.store.put("runs", run)
         if connections is not None:
             self._connection_snapshots[run["id"]] = connections
+        if notebook_secrets is not None:
+            self._secret_snapshots[run["id"]] = notebook_secrets
         self.queue.put(run["id"])
         return run
 
@@ -291,6 +303,9 @@ class SingleSessionRuntime:
                     process.wait(timeout=10)
                 except subprocess.TimeoutExpired:
                     process.kill()
+            if self._stderr_thread is not None:
+                self._stderr_thread.join(timeout=1)
+                self._stderr_thread = None
             if self.log:
                 self.log.close()
                 self.log = None
@@ -322,6 +337,9 @@ class SingleSessionRuntime:
             log_dir = self.store.directory / "logs"
             log_dir.mkdir(exist_ok=True)
             self.log = (log_dir / "worker.log").open("a", encoding="utf-8")
+            from .secret_runtime import RedactionHistory
+
+            self._redaction_history = RedactionHistory()
             python_paths = [str(package_dir or self.store.directory / "site-packages")]
             if os.getenv("PYTHONPATH"):
                 python_paths.append(os.environ["PYTHONPATH"])
@@ -362,14 +380,51 @@ class SingleSessionRuntime:
                 [sys.executable, "-u", "-m", "openbricks.worker"],
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
-                stderr=self.log,
+                stderr=subprocess.PIPE,
                 text=True,
                 encoding="utf-8",
                 bufsize=1,
                 env=env,
                 start_new_session=os.name != "nt",
             )
+            self._capture_native_stderr(self.process, self.log, self._redaction_history)
             return self.process
+
+    def _capture_native_stderr(self, process, log, history):
+        """Mask native/JVM output before writing it to the host log file."""
+        from .execution import Redactor, StreamRedactor
+
+        def capture():
+            stream = StreamRedactor(Redactor())
+
+            def write(value):
+                if not value:
+                    return
+                try:
+                    if log.tell() > 5 * 1024 * 1024:
+                        log.seek(0)
+                        log.truncate()
+                    log.write(value)
+                    log.flush()
+                except (OSError, ValueError):
+                    pass
+
+            try:
+                while True:
+                    chunk = process.stderr.readline(4096)
+                    if not chunk:
+                        break
+                    stream.redactor = Redactor(history.include())
+                    write(stream.feed(chunk))
+                stream.redactor = Redactor(history.include())
+                write(stream.feed(final=True))
+            except (OSError, ValueError):
+                pass
+
+        self._stderr_thread = threading.Thread(
+            target=capture, daemon=True, name="openbricks-native-log-redactor"
+        )
+        self._stderr_thread.start()
 
     def _loop(self):
         while not self.stopping:
@@ -389,11 +444,27 @@ class SingleSessionRuntime:
                     if self.stopping or not run or run["status"] != "queued":
                         continue
                     self.active_id = run_id
+                    self._running_run = run
+                    from .profiling import new_profile, ResourceSampler
+
+                    run.setdefault("profile", new_profile())
+                    try:
+                        queued_at = datetime.fromisoformat(run["created_at"])
+                        run["profile"]["queue_wait_ms"] = max(
+                            0,
+                            round(
+                                (datetime.now(timezone.utc) - queued_at).total_seconds()
+                                * 1000
+                            ),
+                        )
+                    except (ValueError, TypeError):
+                        pass
                     run.update(status="running", started_at=now(), queued_reason=None)
                     self.store.put("runs", run)
                 started = time.monotonic()
                 expired = threading.Event()
                 sample_stop = threading.Event()
+                resource_sampler = ResourceSampler(started=started)
 
                 def sample_memory(run=run, sample_stop=sample_stop, run_id=run_id):
                     last_saved = 0.0
@@ -401,13 +472,14 @@ class SingleSessionRuntime:
                         process = self.process
                         if process:
                             try:
-                                parent = psutil.Process(process.pid)
-                                total = parent.memory_info().rss
-                                for child in parent.children(recursive=True):
-                                    try:
-                                        total += child.memory_info().rss
-                                    except psutil.Error:
-                                        pass
+                                sample = resource_sampler.sample(process.pid)
+                                if sample is None:
+                                    continue
+                                total = sample["total_rss_bytes"]
+                                with self.state_lock:
+                                    run["profile"][
+                                        "resources"
+                                    ] = resource_sampler.snapshot()
                                 run["peak_memory_bytes"] = max(
                                     run.get("peak_memory_bytes", 0), total
                                 )
@@ -471,6 +543,16 @@ class SingleSessionRuntime:
                         process = self._get_process(
                             package_dir, run["environment_id"], run["project_id"]
                         )
+                        if run_id in self._secret_snapshots:
+                            secret_values = self._secret_snapshots[run_id]
+                        else:
+                            from .notebook_secrets import secrets_for_runtime
+
+                            secret_values = secrets_for_runtime(
+                                self.store,
+                                run["_notebook"],
+                                owner_id=run.get("owner_id"),
+                            )
                         request = {
                             "run_id": run_id,
                             "notebook_id": run["notebook_id"],
@@ -481,6 +563,7 @@ class SingleSessionRuntime:
                             "repository_paths": [],
                             "parameters": run["parameters"],
                             "project_id": run["project_id"],
+                            "notebook_secrets": secret_values,
                         }
                         if run_id in self._connection_snapshots:
                             request["connections"] = self._connection_snapshots[run_id]
@@ -501,7 +584,31 @@ class SingleSessionRuntime:
                                 )
                         from .execution import Redactor
 
-                        redactor = Redactor(request["connections"])
+                        from .secret_runtime import RedactionHistory, SecretHistoryFull
+
+                        if self._redaction_history is None:
+                            self._redaction_history = RedactionHistory()
+                        known_values = [
+                            *secret_values,
+                            *(
+                                {"value": str(value)}
+                                for item in request["connections"]
+                                for value in item.get("secrets", {}).values()
+                                if value is not None and str(value)
+                            ),
+                        ]
+                        try:
+                            historical = self._redaction_history.include(known_values)
+                        except SecretHistoryFull:
+                            self.reset()
+                            process = self._get_process(
+                                package_dir, run["environment_id"], run["project_id"]
+                            )
+                            self._redaction_history = RedactionHistory()
+                            historical = self._redaction_history.include(known_values)
+                        redactor = Redactor([*request["connections"], *historical])
+                        resource_sampler.sample(process.pid, force=True)
+                        run["profile"]["resources"] = resource_sampler.snapshot()
                         process.stdin.write(json.dumps(request) + "\n")
                         process.stdin.flush()
                     finished = False
@@ -512,7 +619,14 @@ class SingleSessionRuntime:
                             continue
                         if event.get("run_id") != run_id:
                             continue
+                        raw_event = event
                         event = redactor.event(event)
+                        if raw_event.get("type") == "profile":
+                            from .profiling import redact_spark_profile
+
+                            event["spark"] = redact_spark_profile(
+                                raw_event["spark"], redactor
+                            )
                         if (
                             event.get("type") == "spark_lease_request"
                             and self.coordinator
@@ -527,6 +641,10 @@ class SingleSessionRuntime:
                                 + "\n"
                             )
                             process.stdin.flush()
+                        elif event.get("type") == "profile":
+                            with self.state_lock:
+                                run["profile"]["spark"] = event["spark"]
+                                self.store.put("runs", run)
                         elif event.get("type") == "cell":
                             run["outputs"].append(event["output"])
                             with self.state_lock:
@@ -573,6 +691,9 @@ class SingleSessionRuntime:
                     timer.cancel()
                     sample_stop.set()
                     sampler.join(timeout=1)
+                    if self.process is not None:
+                        resource_sampler.sample(self.process.pid, force=True)
+                    run["profile"]["resources"] = resource_sampler.snapshot()
                     if run_id in self.cancelled:
                         run.update(
                             status="cancelled",
@@ -609,8 +730,10 @@ class SingleSessionRuntime:
             finally:
                 with self.state_lock:
                     self._connection_snapshots.pop(run_id, None)
+                    self._secret_snapshots.pop(run_id, None)
                     self.cancelled.discard(run_id)
                     self.active_id = None
+                    self._running_run = None
                     self.last_activity = time.monotonic()
                     self.queue.task_done()
                 if self.coordinator:

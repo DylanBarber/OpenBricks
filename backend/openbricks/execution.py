@@ -22,13 +22,22 @@ class Redactor:
         if isinstance(value, str):
             return self.text(value)
         if isinstance(value, dict):
-            return {key: self.clean(item) for key, item in value.items()}
+            return {self.text(key) if isinstance(key, str) else key: self.clean(item) for key, item in value.items()}
         if isinstance(value, list):
             return [self.clean(item) for item in value]
         return value
 
     def event(self, value):
-        safe = self.clean(value)
+        # Event/output/result keys are a fixed wire schema, not user field
+        # names. Mask their contents while retaining keys a short credential
+        # may coincidentally equal ("output", "stdout", "columns", ...).
+        safe = {key: self.clean(item) for key, item in value.items()}
+        if isinstance(value.get("output"), dict):
+            safe["output"] = self.output(value["output"])
+        if isinstance(value.get("result"), dict):
+            safe["result"] = self.table(value["result"])
+        if isinstance(value.get("report"), dict):
+            safe["report"] = self.record(value["report"])
         # Credentials can be very short. Never rewrite protocol identifiers or
         # enum fields, otherwise an innocent match can lose the completion
         # event or attach output to a different cell.
@@ -40,6 +49,29 @@ class Redactor:
                 if key in value["output"]:
                     safe["output"][key] = value["output"][key]
         return safe
+
+    def table(self, value):
+        if not isinstance(value, dict):
+            return self.clean(value)
+        return {key: self.clean(item) for key, item in value.items()}
+
+    def output(self, value):
+        safe = {key: self.clean(item) for key, item in value.items()}
+        if "result" in value:
+            safe["result"] = self.table(value["result"])
+        for key in ("cell_id", "status"):
+            if key in value:
+                safe[key] = value[key]
+        return safe
+
+    def record(self, value):
+        """Structured quality records, with arbitrary row/metadata maps masked."""
+        if isinstance(value, dict):
+            return {key: self.clean(item) if key in ("rows", "metadata", "parameters", "properties") else self.record(item)
+                    for key, item in value.items()}
+        if isinstance(value, list):
+            return [self.record(item) for item in value]
+        return self.clean(value)
 
 
 class StreamRedactor:

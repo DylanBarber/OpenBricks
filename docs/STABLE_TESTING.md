@@ -1,17 +1,26 @@
 # Reproduce the stable-release system tests
 
+The 0.5 gate includes real Chromium browser tests. Install Node.js 22 or newer
+and the web dependencies before running it. On Windows, `npx playwright install
+chromium` is sufficient for the browser download; Linux CI uses `--with-deps`.
+All browser targets are restricted to the disposable server on port 3001.
+
 Run the complete application against fresh local services with one command:
 
 ```sh
 python -m pip install ./cli
+npm --prefix web ci
+cd web
+npx playwright install --with-deps chromium
+cd ..
 python scripts/run-system-smoke.py
 ```
 
 This builds the runtime and compute images from your checkout, starts a disposable installation, exercises the real HTTP APIs through the web proxy, restarts services at defined checkpoints, and restores an encrypted backup into a second fresh installation. A failed assertion, timeout, child process, or cleanup returns a nonzero exit code. No production installation or cloud account is required.
 
-Use Python 3.10 or newer, Git, and Docker Compose v2 with support for `up --wait`. Docker must run Linux amd64 containers; SQL Server's Developer image is amd64 and requires acceptance of Microsoft's development/test license. The fixture accepts its EULA only for this disposable test. Internet access is required for image pulls, the initial build, and cloning the public OpenBricks example repository. The Git and remote-wheel proofs deliberately verify a real public clone; this is not an offline test.
+Use Python 3.10 or newer, Node.js 22 or newer, Git, and Docker Compose v2 with support for `up --wait`. Docker must run Linux amd64 containers; SQL Server's Developer image is amd64 and requires acceptance of Microsoft's development/test license. The fixture accepts its EULA only for this disposable test. Internet access is required for image pulls, the initial build, and cloning the public OpenBricks example repository. The Git and remote-wheel proofs deliberately verify a real public clone; this is not an offline test.
 
-Allow at least 8 GB of memory for Docker and about 20 GB of free disk space for images, temporary databases, and encrypted recovery archives. The full sequence can take 45–90 minutes on a developer machine, particularly with an uncached image build. The runner prints the active phase and a heartbeat while longer checks run. It runs Spark phases sequentially, stops SQL Server before remote-worker tests, and stops the source worker before starting the fresh recovery host. Each container also has a hard memory and swap ceiling in [compose.smoke.yaml](../compose.smoke.yaml).
+Allow at least 8 GB of memory for Docker and about 20 GB of free disk space for images, temporary databases, and encrypted recovery archives. The full sequence can take 45Ã¢â‚¬â€œ90 minutes on a developer machine, particularly with an uncached image build. The runner prints the active phase and a heartbeat while longer checks run. It runs Spark phases sequentially, stops SQL Server before remote-worker tests, and stops the source worker before starting the fresh recovery host. Each container also has a hard memory and swap ceiling in [compose.smoke.yaml](../compose.smoke.yaml).
 
 To inspect the complete sequence without Docker or generated credentials:
 
@@ -23,15 +32,15 @@ To test already built images, supply both image references:
 
 ```sh
 python scripts/run-system-smoke.py \
-  --runtime-image ghcr.io/dylanbarber/openbricks:0.4.0 \
-  --compute-image ghcr.io/dylanbarber/openbricks-compute:0.4.0
+  --runtime-image ghcr.io/dylanbarber/openbricks:0.5.0 \
+  --compute-image ghcr.io/dylanbarber/openbricks-compute:0.5.0
 ```
 
 In PowerShell, put this command on one line or use PowerShell's backtick continuation. Supplied runtime and compute images must have the same build identity and contain the corresponding backend tests. Running images from another revision against a modified checkout is not a valid release proof.
 
 ## Isolation and cleanup
 
-The namespace `openbricks-smoke` and loopback ports `3001`, `3002`, and `8025` are reserved for this harness. **Every run removes existing containers and volumes in that namespace before starting.** Do not use that namespace for anything you intend to keep. The regular OpenBricks project, port `3000`, and production volumes are never targeted. Running a normal OpenBricks installation alongside the harness is supported if enough memory remains available; stopping it yourself may free capacity.
+The namespace `openbricks-smoke` and loopback ports `3001`, `3002`, `8025`, and `8036` are reserved for this harness. **Every run removes existing containers and volumes in that namespace before starting.** Do not use that namespace for anything you intend to keep. The regular OpenBricks project, port `3000`, and production volumes are never targeted. Running a normal OpenBricks installation alongside the harness is supported if enough memory remains available; stopping it yourself may free capacity.
 
 The runner accepts only the fixed disposable origin `http://127.0.0.1:3001`. It refuses another project or origin, ignores normal `OPENBRICKS_*` and `COMPOSE_*` configuration, and uses an explicit generated environment file instead of your `.env`. Before mutation, it validates the rendered Compose project, loopback ports, named volumes, networks, and read-only configuration mounts. A conflicting process on a reserved test port causes a failure. It never runs a global Docker prune or deletes host data directories.
 
@@ -69,6 +78,20 @@ The committed placeholders are sufficient for this cleanup because Compose only 
 The SMTP/webhook receiver only stores synthetic messages locally. It does not relay email or contact third-party webhook services. S3-compatible storage uses local SeaweedFS. Unity Catalog and the SQL Server run entirely in the disposable Docker network; SQL Server is not published on a host port.
 
 ## Receipts and diagnosis
+
+The 0.5 phases also exercise real Spark profiling and explicit Unity Catalog
+concurrency, dashboards backed by actual DuckDB queries, quality/lineage evidence,
+encrypted selected notebook secrets, live cell coediting, reviews, audit export,
+and a real browser redirect through the synthetic OIDC provider. The fixture
+provider uses loopback port 8036 and ephemeral signing keys inside the existing
+receiver container. It is not a production identity provider or a new default
+OpenBricks service. Fresh-host recovery verifies the new metadata, cached results,
+source hashes and a rerun using the restored encrypted secret.
+
+Browser JSON reports, screenshots and failure traces are stored under
+`.test-data/e2e`; they contain only disposable fixtures but can still include
+generated login credentials. They are never uploaded by CI. The release gate
+requires both the HTTP/Spark assertions and the browser test command to succeed.
 
 The final line identifies a new directory such as `.test-data/system-smoke/20261105T120000Z-abc12345`. It contains per-phase logs, `summary.json`, platform/SQL/Git/automation/delivery receipts, a precise notification-restart receipt, the generated environment, SQL credentials, and encrypted backup artifacts. These are **private test artifacts**: recovery receipts include generated backup passphrases, so the encryption is not a reason to publish them.
 

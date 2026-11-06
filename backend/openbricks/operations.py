@@ -59,6 +59,7 @@ OUTPUT_FIELDS = (
     "data_result",
     "quality_reports",
     "lineage",
+    "profile",
 )
 
 
@@ -492,6 +493,9 @@ class Operations:
             automation = getattr(self.app.state, "automation", None)
             if automation:
                 stack.enter_context(automation.maintenance())
+            dashboards = getattr(self.app.state, "dashboards", None)
+            if dashboards:
+                stack.enter_context(dashboards.maintenance())
             workflows = getattr(self.app.state, "workflows", None)
             if include_workflows:
                 stack.enter_context(getattr(workflows, "lock", nullcontext()))
@@ -636,7 +640,7 @@ class Operations:
             with self.store.connect() as db:
                 for id in preview["_output_ids"]:
                     db.execute(
-                        "UPDATE documents SET body=json_set(json_remove(body,'$.data_result','$.data_events','$.quality_reports','$.lineage'),'$.outputs',json('[]'),'$.logs',json('[]'),'$.outputs_expired',json('true')) WHERE kind='runs' AND id=? AND status NOT IN ('running','queued')",
+                        "UPDATE documents SET body=json_set(json_remove(body,'$.data_result','$.data_events','$.quality_reports','$.lineage','$.profile'),'$.outputs',json('[]'),'$.logs',json('[]'),'$.outputs_expired',json('true')) WHERE kind='runs' AND id=? AND status NOT IN ('running','queued')",
                         (id,),
                     )
                 db.execute(

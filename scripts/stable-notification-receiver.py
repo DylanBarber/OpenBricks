@@ -9,11 +9,14 @@ No credentials are persisted and no email is ever forwarded.
 from __future__ import annotations
 
 import argparse
+import importlib.util
+from pathlib import Path
 from email import policy
 from email.parser import BytesParser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import socketserver
+import sys
 import threading
 import time
 
@@ -139,11 +142,28 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--http-port", type=int, default=8025)
     parser.add_argument("--smtp-port", type=int, default=2525)
+    parser.add_argument(
+        "--oidc-fixture",
+        help="Optional read-only synthetic OIDC fixture script for browser smoke testing",
+    )
     args = parser.parse_args()
+    oidc = None
+    if args.oidc_fixture:
+        fixture = Path(args.oidc_fixture).resolve()
+        spec = importlib.util.spec_from_file_location("openbricks_oidc_smoke", fixture)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+        oidc = module.start_server()
     with SMTPServer(("0.0.0.0", args.smtp_port), SMTPHandler) as smtp:
         threading.Thread(target=smtp.serve_forever, daemon=True).start()
         with ThreadingHTTPServer(("0.0.0.0", args.http_port), HTTPHandler) as server:
-            server.serve_forever()
+            try:
+                server.serve_forever()
+            finally:
+                if oidc:
+                    oidc.shutdown()
+                    oidc.server_close()
 
 
 if __name__ == "__main__":

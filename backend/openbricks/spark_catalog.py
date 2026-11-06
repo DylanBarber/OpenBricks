@@ -69,6 +69,34 @@ def catalog_settings(name):
     }
 
 
+def execution_catalog():
+    """Concurrent JVMs require an explicit remote default catalog, not Derby."""
+    mode = os.getenv("OPENBRICKS_SPARK_CATALOG_MODE", "hive").strip().lower()
+    if mode not in ("hive", "unity"):
+        raise ValueError("OPENBRICKS_SPARK_CATALOG_MODE must be hive or unity")
+    if mode == "hive":
+        return {"mode": mode, "default_catalog": "spark_catalog", "shared_derby": True}
+    if not catalog_url():
+        raise ValueError("Unity execution mode requires OPENBRICKS_CATALOG_URL")
+    names = [
+        catalog_name(value.strip())
+        for value in os.getenv("OPENBRICKS_CATALOG_NAMES", "unity").split(",")
+        if value.strip()
+    ]
+    if not names:
+        raise ValueError(
+            "Unity execution mode requires at least one configured catalog"
+        )
+    default = catalog_name(
+        os.getenv("OPENBRICKS_SPARK_DEFAULT_CATALOG", "").strip() or names[0]
+    )
+    if default not in names:
+        raise ValueError(
+            "The default Spark catalog must be in OPENBRICKS_CATALOG_NAMES"
+        )
+    return {"mode": mode, "default_catalog": default, "shared_derby": False}
+
+
 def configure_catalog(builder):
     url = catalog_url()
     directory = Path(os.getenv("OPENBRICKS_CATALOG_JAR_DIR", "/opt/openbricks/jars"))
@@ -94,8 +122,14 @@ def configure_catalog(builder):
     for name in names if url else []:
         for key, value in catalog_settings(name).items():
             builder = builder.config(key, value)
-    # Do not set spark.sql.defaultCatalog: existing unqualified Hive SQL and
-    # saveAsTable calls continue to target spark_catalog.
+    execution = execution_catalog()
+    if execution["mode"] == "unity":
+        builder = builder.config(
+            "spark.sql.defaultCatalog", execution["default_catalog"]
+        )
+        builder = builder.config("spark.sql.catalogImplementation", "in-memory")
+    # Hive stays the default unless an administrator deliberately opts into
+    # Unity-only execution; existing local managed tables are never migrated.
     endpoint = os.getenv("OPENBRICKS_S3_ENDPOINT", "").strip()
     if endpoint:
         parsed = urlsplit(endpoint)

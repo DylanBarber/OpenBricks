@@ -1,0 +1,189 @@
+.root {
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--surface);
+  margin-top: 12px;
+}
+.root > summary {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 13px;
+  cursor: pointer;
+  font-weight: 600;
+}
+.root > summary::before {
+  content: "▸";
+  color: var(--muted);
+}
+.root[open] > summary::before {
+  content: "▾";
+}
+.content {
+  padding: 0 13px 15px;
+  display: grid;
+  gap: 14px;
+  min-width: 0;
+}
+.toolbar {
+  display: flex;
+  align-items: end;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.toolbar label {
+  display: grid;
+  gap: 6px;
+  font-size: 11px;
+  flex: 1;
+  min-width: 180px;
+}
+.toolbar select {
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: var(--bg);
+  color: var(--ink);
+  padding: 8px;
+}
+.paging {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.metrics {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 12px;
+  padding: 13px;
+  background: var(--bg);
+  border-radius: 6px;
+}
+.metrics span,
+.comparison span {
+  display: grid;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 10px;
+}
+.metrics strong {
+  color: var(--ink);
+  font-size: 14px;
+  font-weight: 550;
+}
+.charts {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+.chart {
+  margin: 0;
+  min-width: 0;
+  border: 1px solid var(--line);
+  padding: 12px 8px;
+  border-radius: 6px;
+}
+.chart figcaption {
+  font-weight: 550;
+  font-size: 11px;
+  margin: 0 6px 10px;
+}
+.chart svg {
+  width: 100%;
+  display: block;
+}
+.chart text {
+  fill: var(--muted);
+  font-size: 10px;
+}
+.grid {
+  stroke: var(--line);
+  stroke-width: 1;
+}
+.legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px 12px;
+  padding: 0 6px;
+}
+.legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 9px;
+  color: var(--muted);
+}
+.legend i {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+}
+.note {
+  font-size: 10px;
+  color: var(--muted);
+  line-height: 1.7;
+}
+.comparison {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 10px;
+  border-left: 2px solid var(--coral);
+  padding-left: 12px;
+}
+.comparison strong {
+  color: var(--ink);
+  font-weight: 500;
+}
+.comparison small {
+  color: var(--muted);
+  font-weight: 400;
+}
+.stages th,
+.stages td {
+  padding: 9px 12px;
+}
+.plans {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+}
+.plans details {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  min-width: 0;
+}
+.plans summary {
+  cursor: pointer;
+  padding: 10px;
+  color: var(--muted);
+  font-size: 11px;
+}
+.plans pre {
+  padding: 12px;
+  max-height: 300px;
+  overflow: auto;
+  background: var(--bg);
+  font-size: 10px;
+  line-height: 1.6;
+}
+.srOnly {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+}
+@media (max-width: 900px) {
+  .charts {
+    grid-template-columns: 1fr;
+  }
+}
+@media (max-width: 520px) {
+  .metrics,
+  .comparison {
+    grid-template-columns: repeat(2, 1fr);
+  }
+  .toolbar {
+    align-items: center;
+  }
+}

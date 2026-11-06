@@ -22,6 +22,7 @@ from uuid import uuid4
 import psutil
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import JSONResponse
+from fastapi.exceptions import RequestValidationError
 from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 
@@ -30,6 +31,7 @@ from . import __version__
 from .security import confined_path
 from .store import Store
 from .resources import ResourcePolicy
+from .compute_retention import ComputeRetention
 
 
 def public(value):
@@ -49,6 +51,7 @@ class RunPayload(BaseModel):
     trigger: str = Field(default="manual", max_length=30)
     job_id: str | None = Field(default=None, max_length=80)
     connections: list[dict] = Field(default_factory=list, max_length=256)
+    notebook_secrets: list[dict] = Field(default_factory=list, max_length=32)
     parameters: dict = Field(default_factory=dict)
     timeout_seconds: int | None = Field(default=None, ge=1, le=86400)
     environment: dict | None = None
@@ -134,7 +137,15 @@ def compute_status(app):
         "master": os.getenv("SPARK_MASTER", "local[2]"),
         "spark_driver_memory": os.getenv("SPARK_DRIVER_MEMORY", "1g"),
         "idle_timeout_seconds": runtime.idle_timeout,
+        "spark_catalog_mode": runtime.execution_catalog["mode"],
+        "spark_default_catalog": runtime.execution_catalog["default_catalog"],
+        "spark_catalog_concurrency": (
+            1
+            if runtime.execution_catalog["shared_derby"]
+            else runtime.policy["max_concurrent"]
+        ),
         "uptime_seconds": int(time.monotonic() - app.state.started),
+        "output_retention": app.state.retention.status(),
         "capabilities": [
             "python",
             "spark-sql",
@@ -143,6 +154,8 @@ def compute_status(app):
             "independent-sessions",
             "memory-admission",
             "duckdb",
+            "run-profiles",
+            "notebook-secrets",
         ],
         "storage_scope": (
             "shared-local"
@@ -245,12 +258,15 @@ def create_compute_app(data_dir=None, token=None):
         ):
             (directory / name).mkdir(exist_ok=True)
         app.state.store = ComputeStore(directory)
+        app.state.retention = ComputeRetention(app.state.store)
         app.state.runtime = LocalRuntime(app.state.store)
         app.state.started = time.monotonic()
-        app.state.runtime.start()
         try:
+            app.state.retention.start()
+            app.state.runtime.start()
             yield
         finally:
+            app.state.retention.close()
             app.state.runtime.close()
 
     app = FastAPI(
@@ -298,6 +314,20 @@ def create_compute_app(data_dir=None, token=None):
     async def value_error(request, exc):
         return JSONResponse({"detail": str(exc)}, status_code=400)
 
+    @app.exception_handler(RequestValidationError)
+    async def validation_error(request, exc):
+        # Pydantic's default response includes the rejected input. A transient
+        # secret envelope must never be echoed, including on malformed input.
+        return JSONResponse(
+            {
+                "detail": [
+                    {"loc": list(item["loc"]), "msg": item["msg"], "type": item["type"]}
+                    for item in exc.errors()
+                ]
+            },
+            status_code=422,
+        )
+
     @app.get("/health")
     def health():
         return {"status": "ok"}
@@ -308,6 +338,9 @@ def create_compute_app(data_dir=None, token=None):
 
     @app.post("/runs", status_code=202, dependencies=[Depends(authenticated)])
     def submit(body: RunPayload, request: Request):
+        from .secret_runtime import SecretRegistry
+
+        SecretRegistry(body.notebook_secrets)
         notebook = validate_notebook(body.notebook)
         return public(
             request.app.state.runtime.submit(
@@ -322,6 +355,7 @@ def create_compute_app(data_dir=None, token=None):
                 environment=body.environment,
                 provenance=body.provenance,
                 resource_options=body.resource_options,
+                notebook_secrets=body.notebook_secrets,
             )
         )
 
