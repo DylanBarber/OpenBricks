@@ -269,13 +269,13 @@ class Proof:
         return f"""import time
 from pyspark.sql.types import LongType
 spark.createDataFrame([({marker},)], ['marker']).createOrReplaceTempView('isolation_fixture')
-print('ISOLATION_MARKER', spark.sql('SELECT marker FROM isolation_fixture').first().marker, flush=True)
+print(f'ISOLATION_MARKER {{spark.sql("SELECT marker FROM isolation_fixture").first().marker}}', flush=True)
 def hold(value):
     time.sleep(.06)
     return int(value)
 spark.udf.register({function!r}, hold, LongType())
 display(spark.sql('SELECT SUM({function}(id)) AS total FROM range({rows})'))
-print('FINAL_MARKER', spark.sql('SELECT marker FROM isolation_fixture').first().marker, flush=True)
+print(f'FINAL_MARKER {{spark.sql("SELECT marker FROM isolation_fixture").first().marker}}', flush=True)
 """
 
     def hive(self):
@@ -380,7 +380,12 @@ print('FINAL_MARKER', spark.sql('SELECT marker FROM isolation_fixture').first().
             identifiers = [self.submit(target) for target in targets]
             pair = self.wait(
                 lambda: [self.run(identifier) for identifier in identifiers],
-                lambda values: all(spark_active(value) for value in values),
+                lambda values: all(spark_active(value) for value in values)
+                and all(
+                    "ISOLATION_MARKER " + str(marker)
+                    in "".join(item.get("text", "") for item in value.get("logs", []))
+                    for value, marker in zip(values, (111, 222))
+                ),
                 "simultaneous real Spark SQL stages in two Unity-only JVMs",
             )
             applications = [
