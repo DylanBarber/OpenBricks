@@ -280,9 +280,7 @@ def execute_cell(
     )
     stream("stdout", final=True)
     stream("stderr", final=True)
-    safe = redactor.clean(output)
-    safe.update(cell_id=output["cell_id"], status=output["status"])
-    return safe
+    return redactor.output(output)
 
 
 def run_request(request: dict, emit) -> None:

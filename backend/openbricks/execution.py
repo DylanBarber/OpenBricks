@@ -44,6 +44,8 @@ class Redactor:
         for key in ("type", "run_id", "cell_id", "event_id", "status", "stream", "error_class"):
             if key in value:
                 safe[key] = value[key]
+        if value.get("type") == "lineage" and value.get("action") in ("read", "write"):
+            safe["action"] = value["action"]
         if isinstance(value.get("output"), dict):
             for key in ("cell_id", "status"):
                 if key in value["output"]:
@@ -53,7 +55,10 @@ class Redactor:
     def table(self, value):
         if not isinstance(value, dict):
             return self.clean(value)
-        return {key: self.clean(item) for key, item in value.items()}
+        safe = {key: self.clean(item) for key, item in value.items()}
+        if value.get("kind") == "table":
+            safe["kind"] = "table"
+        return safe
 
     def output(self, value):
         safe = {key: self.clean(item) for key, item in value.items()}

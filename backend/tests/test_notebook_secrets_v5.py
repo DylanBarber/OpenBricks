@@ -303,3 +303,132 @@ def test_short_secret_matches_do_not_rename_wire_schema_or_lose_output(secret):
     assert event["output"]["stdout"] == "[REDACTED]"
     assert event["output"]["result"]["columns"] == ["[REDACTED]"]
     assert event["output"]["result"]["rows"] == [[{"[REDACTED]": "[REDACTED]"}]]
+
+
+@pytest.mark.parametrize(
+    "secret",
+    [
+        "cell_id",
+        "status",
+        "stdout",
+        "stderr",
+        "result",
+        "duration_ms",
+        "columns",
+        "rows",
+        "read",
+        "write",
+        "table",
+    ],
+)
+def test_real_cell_output_preserves_protocol_fields_and_masks_user_maps(secret):
+    from openbricks.worker import execute_cell
+
+    logs = []
+    output = execute_cell(
+        {
+            "id": "wire-cell",
+            "language": "python",
+            "source": (
+                "import sys\nprint(credential)\nprint(credential, file=sys.stderr)\n"
+                "display([{credential: {credential: credential}}])"
+            ),
+        },
+        {"credential": secret},
+        ".",
+        on_log=lambda stream, text: logs.append((stream, text)),
+        redactor=Redactor([{"secrets": {"value": secret}}]),
+    )
+    assert set(output) == {
+        "cell_id",
+        "status",
+        "stdout",
+        "stderr",
+        "result",
+        "duration_ms",
+    }
+    assert output["cell_id"] == "wire-cell" and output["status"] == "succeeded"
+    assert isinstance(output["duration_ms"], int)
+    assert output["stdout"] == output["stderr"] == "[REDACTED]\n"
+    assert output["result"] == {
+        "columns": ["[REDACTED]"],
+        "rows": [[{"[REDACTED]": "[REDACTED]"}]],
+    }
+    assert {stream for stream, _ in logs} == {"stdout", "stderr"}
+    assert all(secret not in text for _, text in logs)
+
+
+@pytest.mark.parametrize(
+    "secret", ["stdout", "result", "columns", "rows", "read", "write", "table"]
+)
+def test_actual_worker_lineage_and_tables_preserve_schema_but_mask_user_data(
+    tmp_path, monkeypatch, secret
+):
+    from openbricks import worker
+
+    monkeypatch.setattr(worker, "_scopes", {})
+    monkeypatch.setattr(worker, "_secret_history", None)
+    monkeypatch.setattr(worker, "_spark", None)
+    events = []
+    worker.run_request(
+        {
+            "run_id": "worker-wire-run",
+            "notebook_id": "worker-wire-book",
+            "data_dir": str(tmp_path),
+            "package_dir": str(tmp_path),
+            "notebook_secrets": [{"scope": "qa", "key": "value", "value": secret}],
+            "cells": [
+                {
+                    "id": "worker-wire-cell",
+                    "language": "python",
+                    "source": (
+                        "credential = dbutils.secrets.get('qa', 'value')\n"
+                        "data.lineage('blob://data/source', 'read', {credential: credential})\n"
+                        "data.lineage('blob://data/sink', 'write', {credential: credential})\n"
+                        "print(credential)\n"
+                        "display([{credential: {credential: credential}}])"
+                    ),
+                }
+            ],
+        },
+        events.append,
+    )
+    assert events[-1]["type"] == "done" and events[-1]["status"] == "succeeded"
+    lineage = [event for event in events if event["type"] == "lineage"]
+    assert [event["action"] for event in lineage] == ["read", "write"]
+    assert all(event["details"] == {"[REDACTED]": "[REDACTED]"} for event in lineage)
+    output = next(event["output"] for event in events if event["type"] == "cell")
+    assert output["status"] == "succeeded" and output["stdout"] == "[REDACTED]\n"
+    assert output["result"] == {
+        "columns": ["[REDACTED]"],
+        "rows": [[{"[REDACTED]": "[REDACTED]"}]],
+    }
+    assert all(
+        event["stream"] == "stdout" for event in events if event["type"] == "log"
+    )
+
+
+def test_only_known_table_discriminator_is_preserved_at_schema_root():
+    redactor = Redactor([{"secrets": {"value": "table"}}])
+    result = {
+        "kind": "table",
+        "columns": ["table"],
+        "rows": [[{"kind": "table", "table": "table"}]],
+    }
+    expected = {
+        "kind": "table",
+        "columns": ["[REDACTED]"],
+        "rows": [[{"kind": "[REDACTED]", "[REDACTED]": "[REDACTED]"}]],
+    }
+    assert redactor.table(result) == expected
+    assert (
+        redactor.event({"type": "data_result", "result": result})["result"] == expected
+    )
+    assert (
+        redactor.output({"cell_id": "cell", "status": "succeeded", "result": result})[
+            "result"
+        ]
+        == expected
+    )
+    unknown = Redactor([{"secrets": {"value": "custom"}}])
+    assert unknown.table({"kind": "custom"}) == {"kind": "[REDACTED]"}
