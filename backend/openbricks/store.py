@@ -9,6 +9,32 @@ from pathlib import Path
 from threading import RLock, local
 from typing import Any
 
+# Only data_lineage reuses these scalar lookup columns: notebook_name holds its
+# observed action. The JSON/API document remains unchanged for every kind.
+LINEAGE_METADATA = {"name": "dataset", "parent_id": "run_id", "notebook_name": "action"}
+
+
+def metadata_expression(column):
+    ordinary = f"json_extract(body,'$.{column}')"
+    if column not in LINEAGE_METADATA:
+        return ordinary
+    lineage = f"json_extract(body,'$.{LINEAGE_METADATA[column]}')"
+    return f"CASE WHEN kind='data_lineage' THEN {lineage} ELSE {ordinary} END"
+
+
+def backfill_lineage_metadata(db):
+    assignments = ",".join(
+        f"{column}=json_extract(body,'$.{field}')"
+        for column, field in LINEAGE_METADATA.items()
+    )
+    changed = " OR ".join(
+        f"{column} IS NOT json_extract(body,'$.{field}')"
+        for column, field in LINEAGE_METADATA.items()
+    )
+    db.execute(
+        f"UPDATE documents SET {assignments} WHERE kind='data_lineage' AND ({changed})"
+    )
+
 
 def scope_clause(project_ids, prefix=""):
     if project_ids is None:
@@ -54,7 +80,7 @@ class Store:
                 db.execute(f"ALTER TABLE documents ADD COLUMN {column} TEXT")
             if added:
                 assignments = ", ".join(
-                    f"{column}=json_extract(body,'$.{column}')" for column in added
+                    f"{column}={metadata_expression(column)}" for column in added
                 )
                 db.execute(f"UPDATE documents SET {assignments}")
             db.execute(
@@ -150,7 +176,14 @@ class Store:
                     kind,
                     value["id"],
                     json.dumps(value, allow_nan=False),
-                    *(value.get(column) for column in metadata),
+                    *(
+                        value.get(
+                            LINEAGE_METADATA.get(column, column)
+                            if kind == "data_lineage"
+                            else column
+                        )
+                        for column in metadata
+                    ),
                 ),
             )
         return value

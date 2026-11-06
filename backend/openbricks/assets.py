@@ -15,6 +15,7 @@ from fastapi import Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
 from .permissions import now
+from .store import backfill_lineage_metadata
 
 QUALITY_RUN_WINDOW = 500
 QUALITY_REPORT_LIMIT = 1000
@@ -92,19 +93,36 @@ class AssetService:
     def __init__(self, store, access):
         self.store, self.access = store, access
         with store.connect() as db:
+            # SQLite 3.40 (the packaged Debian runtime) rejects JSON expression
+            # indexes when an untrusted backup is checked with trusted_schema=OFF.
+            # Ordinary scalar metadata keeps the same lookup keys and permits
+            # that strict validation. Never enable trusted_schema to restore.
+            needs_backfill = False
+            for index in ("asset_lineage_dataset", "asset_lineage_run"):
+                previous = db.execute(
+                    "SELECT sql FROM sqlite_master WHERE type='index' AND name=?",
+                    (index,),
+                ).fetchone()
+                if not previous:
+                    needs_backfill = True
+                elif "json_extract" in (previous[0] or "").lower():
+                    db.execute(f"DROP INDEX {index}")
+                    needs_backfill = True
+            if needs_backfill:
+                backfill_lineage_metadata(db)
             db.execute(
-                "CREATE INDEX IF NOT EXISTS asset_lineage_dataset ON documents(kind,COALESCE(project_id,'default'),json_extract(body,'$.dataset'),created_at DESC)"
+                "CREATE INDEX IF NOT EXISTS asset_lineage_dataset ON documents(kind,COALESCE(project_id,'default'),name,created_at DESC,id)"
             )
             db.execute(
-                "CREATE INDEX IF NOT EXISTS asset_lineage_run ON documents(kind,COALESCE(project_id,'default'),json_extract(body,'$.run_id'),json_extract(body,'$.action'))"
+                "CREATE INDEX IF NOT EXISTS asset_lineage_run ON documents(kind,COALESCE(project_id,'default'),parent_id,notebook_name)"
             )
 
     def _datasets_sql(self):
         # Metadata only: no run outputs or notebook sources enter Python.
         return """WITH datasets AS (
-            SELECT json_extract(body,'$.dataset') AS dataset,MAX(created_at) AS last_observed_at
+            SELECT name AS dataset,MAX(created_at) AS last_observed_at
             FROM documents WHERE kind='data_lineage' AND COALESCE(project_id,'default')=?
-            GROUP BY json_extract(body,'$.dataset')
+            GROUP BY name
             UNION ALL
             SELECT name AS dataset,updated_at AS last_observed_at FROM documents
             WHERE kind='asset_annotations' AND COALESCE(project_id,'default')=?
@@ -208,10 +226,10 @@ class AssetService:
                 identifier = asset_id(project_id, dataset)
                 annotation = self.store.get("asset_annotations", identifier) or {}
                 observations = db.execute(
-                    """SELECT l.created_at,json_extract(l.body,'$.action'),json_extract(l.body,'$.run_id'),r.status
-                    FROM documents l LEFT JOIN documents r ON r.kind='runs' AND r.id=json_extract(l.body,'$.run_id')
+                    """SELECT l.created_at,l.notebook_name,l.parent_id,r.status
+                    FROM documents l LEFT JOIN documents r ON r.kind='runs' AND r.id=l.parent_id
                         AND COALESCE(r.project_id,'default')=COALESCE(l.project_id,'default')
-                    WHERE l.kind='data_lineage' AND COALESCE(l.project_id,'default')=? AND json_extract(l.body,'$.dataset')=?
+                    WHERE l.kind='data_lineage' AND COALESCE(l.project_id,'default')=? AND l.name=?
                     ORDER BY l.created_at DESC,l.id DESC LIMIT 100""",
                     (project_id, dataset),
                 ).fetchall()
@@ -362,31 +380,31 @@ class AssetService:
             if not frontier:
                 break
             placeholders = ",".join("?" for _ in frontier)
-            base = """SELECT json_extract(r.body,'$.dataset'),json_extract(w.body,'$.dataset'),
-                    json_extract(r.body,'$.run_id'),MAX(r.created_at,w.created_at),run.status
+            base = """SELECT r.name,w.name,
+                    r.parent_id,MAX(r.created_at,w.created_at),run.status
                 FROM documents r JOIN documents w ON w.kind='data_lineage'
                     AND COALESCE(w.project_id,'default')=COALESCE(r.project_id,'default')
-                    AND json_extract(w.body,'$.run_id')=json_extract(r.body,'$.run_id')
-                LEFT JOIN documents run ON run.kind='runs' AND run.id=json_extract(r.body,'$.run_id')
+                    AND w.parent_id=r.parent_id
+                LEFT JOIN documents run ON run.kind='runs' AND run.id=r.parent_id
                     AND COALESCE(run.project_id,'default')=COALESCE(r.project_id,'default')
                 WHERE r.kind='data_lineage' AND COALESCE(r.project_id,'default')=?
-                    AND json_extract(r.body,'$.action')='read' AND json_extract(w.body,'$.action')='write'
+                    AND r.notebook_name='read' AND w.notebook_name='write'
                     AND """
             if direction == "upstream":
                 condition, values = (
-                    "json_extract(w.body,'$.dataset') IN (" + placeholders + ")",
+                    "w.name IN (" + placeholders + ")",
                     [*frontier],
                 )
             elif direction == "downstream":
                 condition, values = (
-                    "json_extract(r.body,'$.dataset') IN (" + placeholders + ")",
+                    "r.name IN (" + placeholders + ")",
                     [*frontier],
                 )
             else:
                 condition = (
-                    "(json_extract(r.body,'$.dataset') IN ("
+                    "(r.name IN ("
                     + placeholders
-                    + ") OR json_extract(w.body,'$.dataset') IN ("
+                    + ") OR w.name IN ("
                     + placeholders
                     + "))"
                 )

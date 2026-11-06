@@ -239,6 +239,46 @@ def test_real_subprocess_encrypted_probe_boots_without_executing_restored_work(
     assert not list(tmp_path.glob(".restore-drill-*"))
 
 
+def test_populated_assets_archive_passes_strict_extract_and_real_restore_probe(
+    source, tmp_path
+):
+    from openbricks.assets import AssetService
+    from openbricks.permissions import Access
+
+    source.put(
+        "runs", {"id": "completed", "project_id": "default", "status": "succeeded"}
+    )
+    for action, dataset in (
+        ("read", "blob://data/source"),
+        ("write", "blob://data/sink"),
+    ):
+        source.put(
+            "data_lineage",
+            {
+                "id": action,
+                "project_id": "default",
+                "run_id": "completed",
+                "action": action,
+                "dataset": dataset,
+                "created_at": "2026-11-06T00:00:00+00:00",
+            },
+        )
+    AssetService(source, Access(source))
+    encrypted = encrypted_archive(source, tmp_path)
+    restored_root = tmp_path / "strict-extraction"
+    extract_archive(encrypted, restored_root, "synthetic-long-passphrase")
+    restored = Store(restored_root)
+    graph = AssetService(restored, Access(restored)).graph(
+        "default", "blob://data/sink", "upstream"
+    )
+    assert len(graph["nodes"]) == 2 and len(graph["edges"]) == 1
+    assert graph["edges"][0]["run_id"] == "completed"
+    completed = probe_subprocess(encrypted, "synthetic-long-passphrase")
+    assert completed.returncode == 0, completed.stderr
+    assert json.loads(completed.stdout)["passed"] is True
+    assert not (tmp_path / "UNSAFE-EXECUTION").exists()
+
+
 def test_real_subprocess_wrong_passphrase_returns_only_generic_failure(
     source, tmp_path
 ):
