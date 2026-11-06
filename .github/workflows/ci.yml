@@ -16,7 +16,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: docker/setup-buildx-action@v3
-      - uses: docker/build-push-action@v6
+      - uses: docker/build-push-action@v7
         with:
           context: .
           target: compute
@@ -50,7 +50,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: docker/setup-buildx-action@v3
-      - uses: docker/build-push-action@v6
+      - uses: docker/build-push-action@v7
         with:
           context: .
           target: compute
@@ -108,7 +108,7 @@ jobs:
       - name: Smoke runner isolation and watcher checks
         run: python -m pytest -q tests/test_system_smoke_runner.py tests/test_release_workflow.py tests/test_v5_features_smoke.py
       - uses: docker/setup-buildx-action@v3
-      - uses: docker/build-push-action@v6
+      - uses: docker/build-push-action@v7
         with:
           context: .
           target: compute
@@ -117,7 +117,7 @@ jobs:
           build-args: OPENBRICKS_BUILD_ID=${{ github.sha }}
           cache-from: type=gha,scope=compute
           cache-to: type=gha,mode=max,scope=compute-system
-      - uses: docker/build-push-action@v6
+      - uses: docker/build-push-action@v7
         with:
           context: .
           target: runtime
