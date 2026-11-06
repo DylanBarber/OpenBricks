@@ -433,6 +433,7 @@ export function WorkspaceBrowser({
                       <td>
                         <button
                           className="name-link"
+                          aria-label={`Open ${notebook.name}`}
                           onClick={() => onOpen(notebook.id)}
                         >
                           <span className="file-icon">

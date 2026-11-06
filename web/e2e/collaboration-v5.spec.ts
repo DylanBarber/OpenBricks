@@ -8,7 +8,7 @@ async function openNotebook(page: Page, name: string) {
     .getByRole("button", { name: "Notebooks", exact: true })
     .click();
   await page.getByLabel("Search notebooks in all folders").fill(name);
-  await page.getByText(name, { exact: true }).click();
+  await page.getByRole("button", { name: `Open ${name}`, exact: true }).click();
   await page
     .locator(".notebook-toolbar")
     .getByRole("button", { name: "Collaborate", exact: true })
@@ -184,8 +184,10 @@ test("project owners can filter and export audit history through the UI", async 
   await expect(
     admin.getByRole("cell", { name: id, exact: true }),
   ).toBeVisible();
+  const exportLink = admin.getByRole("link", { name: "Export CSV", exact: true });
+  await expect(exportLink).toHaveAttribute("href", /[?&]action=comment\.create(?:&|$)/);
   const promise = admin.waitForEvent("download");
-  await admin.getByRole("link", { name: "Export CSV", exact: true }).click();
+  await exportLink.click();
   const download = await promise;
   const path = testInfo.outputPath("audit.csv");
   await download.saveAs(path);

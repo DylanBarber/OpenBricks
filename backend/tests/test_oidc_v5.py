@@ -462,6 +462,9 @@ def test_disposable_browser_provider_fixture_round_trip(monkeypatch):
         url, binding = service.begin()
         chooser = httpx.get(url, timeout=5)
         assert chooser.status_code == 200 and "Continue as Alice" in chooser.text
+        assert "form-action 'self' http://testserver;" in chooser.headers[
+            "content-security-policy"
+        ]
         authorized = httpx.get(
             url + "&identity=alice", follow_redirects=False, timeout=5
         )

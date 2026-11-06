@@ -78,6 +78,16 @@ def start_server(
         ),
         os.getenv("OPENBRICKS_SMOKE_OIDC_CLIENT_ID", "openbricks-smoke"),
     )
+    callback = urlsplit(state.redirect_uri)
+    if (
+        callback.scheme not in ("http", "https")
+        or not callback.hostname
+        or callback.username
+        or callback.password
+        or re.search(r"[\s;'\"<>]", state.redirect_uri)
+    ):
+        raise ValueError("Smoke callback URI is invalid")
+    callback_origin = f"{callback.scheme}://{callback.netloc}"
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args):
@@ -92,7 +102,9 @@ def start_server(
             self.send_header("X-Content-Type-Options", "nosniff")
             self.send_header(
                 "Content-Security-Policy",
-                "default-src 'none'; form-action 'self'; style-src 'unsafe-inline'; frame-ancestors 'none'",
+                # Chromium also checks redirects after a form submission. Permit
+                # only this fixture and its explicitly configured callback origin.
+                f"default-src 'none'; form-action 'self' {callback_origin}; style-src 'unsafe-inline'; frame-ancestors 'none'",
             )
             self.end_headers()
             self.wfile.write(raw)

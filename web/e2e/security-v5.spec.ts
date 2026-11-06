@@ -7,7 +7,7 @@ async function openNotebook(page: Page, name: string) {
     .getByRole("button", { name: "Notebooks", exact: true })
     .click();
   await page.getByLabel("Search current view").fill(name);
-  await page.getByText(name, { exact: true }).click();
+  await page.getByRole("button", { name: `Open ${name}`, exact: true }).click();
   await expect(page.getByLabel("Notebook name")).toHaveValue(name);
 }
 
@@ -67,11 +67,9 @@ test("notebook secrets are created, selected, redacted and rotated through the r
     .fill("Disposable browser-test credentials");
   await modal.getByRole("button", { name: "Save scope", exact: true }).click();
   await expect(modal).not.toBeVisible();
-  const card = admin
-    .locator("article")
-    .filter({
-      has: admin.getByRole("heading", { name: scopeName, exact: true }),
-    });
+  const card = admin.locator("article").filter({
+    has: admin.getByRole("heading", { name: scopeName, exact: true }),
+  });
   await card.getByRole("button", { name: "Add key", exact: true }).click();
   modal = admin.getByRole("dialog", { name: `Add key to ${scopeName}` });
   await modal.getByLabel("Key name").fill("token");

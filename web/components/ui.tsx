@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, type ReactNode } from "react";
+import { Children, cloneElement, isValidElement, useEffect, useId, useRef, type ReactNode } from "react";
 import { Check, ChevronLeft, ChevronRight, FileCode2, LoaderCircle, X } from "lucide-react";
 import { brandShapes } from "@/lib/brand";
 
@@ -23,7 +23,28 @@ export function Modal({ title, children, onClose, wide = false }: { title: strin
   useEffect(() => { const dialog = dialogRef.current; dialog?.showModal(); return () => dialog?.close(); }, []);
   return <dialog ref={dialogRef} className={`modal ${wide ? "wide" : ""}`} onCancel={event => { event.preventDefault(); onClose(); }} onClick={event => { if (event.target === event.currentTarget) onClose(); }} aria-label={title}><div className="modal-head"><h2>{title}</h2><button type="button" className="icon-button" aria-label="Close dialog" onClick={onClose}><X size={18} /></button></div>{children}</dialog>;
 }
-export function Field({ label, children, hint }: { label: string; children: ReactNode; hint?: string }) { return <label className="field"><span>{label}</span>{children}{hint ? <small>{hint}</small> : null}</label>; }
+export function Field({ label, children, hint }: { label: string; children: ReactNode; hint?: string }) {
+  const labelId = useId();
+  const hintId = `${labelId}-hint`;
+  const controls = Children.map(children, child => {
+    // Custom controls retain their own accessibility contract. Native controls
+    // get the visible label rather than option text and hints inside the wrapper.
+    if (!isValidElement<{
+      "aria-label"?: string;
+      "aria-labelledby"?: string;
+      "aria-describedby"?: string;
+    }>(child) || typeof child.type !== "string" || !["input", "select", "textarea"].includes(child.type)) return child;
+    const props = child.props;
+    const names = props["aria-label"] !== undefined || props["aria-labelledby"] !== undefined;
+    const descriptions = new Set((props["aria-describedby"] || "").split(/\s+/).filter(Boolean));
+    if (hint) descriptions.add(hintId);
+    return cloneElement(child, {
+      ...(names ? {} : { "aria-labelledby": labelId }),
+      ...(descriptions.size ? { "aria-describedby": [...descriptions].join(" ") } : {}),
+    });
+  });
+  return <label className="field"><span id={labelId}>{label}</span>{controls}{hint ? <small id={hintId}>{hint}</small> : null}</label>;
+}
 export function Success({ children }: { children: ReactNode }) { return <span className="success-inline"><Check size={14} />{children}</span>; }
 export function Crumb({ children }: { children: ReactNode }) { return <><ChevronRight size={13} className="muted" /><span>{children}</span></>; }
 
